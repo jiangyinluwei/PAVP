@@ -41,7 +41,8 @@ if (-not (Test-Path $settingsPath)) {
   "act_max_turns": 40,
   "act_timeout": 600,
   "loop_mode": "auto",
-  "auto_start": true
+  "auto_start": true,
+  "auto_start_ui": false
 }
 '@
     $settingsDir = Join-Path $HOME ".pavp"

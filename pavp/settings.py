@@ -46,6 +46,7 @@ DEFAULTS: dict[str, Any] = {
     "act_timeout": 600,
     "loop_mode": "auto",
     "auto_start": True,
+    "auto_start_ui": False,
 }
 
 TEMPLATE: dict[str, Any] = dict(DEFAULTS)

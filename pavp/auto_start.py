@@ -1,8 +1,8 @@
 """Auto-start on boot support (Windows Registry Run key).
 
-Registers/unregisters the PAVP Streamlit UI to start automatically
-when Windows boots. The UI will then auto-start the proxy server
-if the auto_start setting is enabled.
+When auto-start is enabled:
+- Always starts the PAVP proxy server (PAVP-Proxy) on boot.
+- Optionally starts the Streamlit UI (PAVP-UI) if auto_start_ui is True.
 """
 from __future__ import annotations
 
@@ -10,11 +10,15 @@ import sys
 from pathlib import Path
 
 
-def set_auto_start(enabled: bool, port: int | None = None) -> None:
+def set_auto_start(enabled: bool, port: int | None = None, auto_start_ui: bool = False) -> None:
     """Enable or disable auto-start in Windows registry.
 
-    Starts the Streamlit UI (control panel) on boot.
-    The UI will then auto-start the proxy server if enabled in settings.
+    When enabled, always starts the PAVP proxy server on boot.
+    If *auto_start_ui* is True, also starts the Streamlit UI control panel.
+
+    Registry entries:
+      - PAVP-Proxy: always set when enabled, starts the proxy server.
+      - PAVP-UI:    set only when enabled AND auto_start_ui is True.
     """
     if sys.platform != "win32":
         return
@@ -38,20 +42,37 @@ def set_auto_start(enabled: bool, port: int | None = None) -> None:
     try:
         if enabled:
             python_exe = sys.executable
-            # Use pythonw.exe if available for silent (no console window) startup
             python_dir = Path(python_exe).parent
             pythonw = python_dir / "pythonw.exe"
             if pythonw.exists():
                 python_exe = str(pythonw)
-            # Start the Streamlit UI (control panel) on boot.
-            # The UI will auto-start the proxy server when auto_start is enabled.
-            ui_path = Path(__file__).resolve().parent / "ui.py"
-            cmd = f'"{python_exe}" -m streamlit run "{ui_path}" --server.port 8501'
-            winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, cmd)
+
+            # Always start the proxy server on boot
+            proxy_cmd = (
+                f'"{python_exe}" -m pavp.proxy_server'
+                f" --host 0.0.0.0 --port {port}"
+            )
+            winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, proxy_cmd)
+
+            # Optionally start the Streamlit UI
+            if auto_start_ui:
+                ui_path = Path(__file__).resolve().parent / "ui.py"
+                ui_cmd = (
+                    f'"{python_exe}" -m streamlit run "{ui_path}"'
+                    f" --server.port 8501"
+                )
+                winreg.SetValueEx(key, "PAVP-UI", 0, winreg.REG_SZ, ui_cmd)
+            else:
+                try:
+                    winreg.DeleteValue(key, "PAVP-UI")
+                except FileNotFoundError:
+                    pass
         else:
-            try:
-                winreg.DeleteValue(key, "PAVP-Proxy")
-            except FileNotFoundError:
-                pass
+            # Remove both entries when auto-start is disabled
+            for name in ("PAVP-Proxy", "PAVP-UI"):
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
     finally:
         winreg.CloseKey(key)
