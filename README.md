@@ -1,0 +1,184 @@
+# PAVP — Plan-Act-Verify-Plan
+
+**PAVP** 是一个本地代理框架，通过 LLM 编排（Plan → Act → Verify → Loop）来增强编码 Agent 的能力，同时大幅降低 API 调用成本。
+
+**PAVP** is a local proxy framework that enhances coding agents through LLM orchestration (Plan → Act → Verify → Loop), while significantly reducing API call costs.
+
+---
+
+![ui pic](./pavp/123.png "ui pic")
+
+---
+
+## 项目介绍
+
+### 1. 项目逻辑
+
+PAVP 本质上是一个 **LLM 编排层**，通过本地代理服务实现：
+
+- **Plan**：用高能力模型（如 GLM-5.2）分析需求，输出结构化计划
+- **Act**：用执行模型（如 DeepSeek V4 Flash）根据计划生成代码，通过 Claude Code 写入文件
+- **Verify**：用高能力模型审计代码改动，输出 PASS / DO-NOT-SHIP（含 DebugPlan）/ INCOMPLETE（含 NewPlan）
+- **Loop**：失败时自动或手动循环，直到通过或达到最大迭代次数
+
+架构分为两种模式：
+
+- **Proxy 模式**（推荐）：运行本地代理服务，Agent 直接通过 OpenAI 兼容接口调用，PAVP 在后台透明完成 Plan → Act
+- **Orchestrator 模式**（CLI）：通过 `python -m pavp` 运行完整 Plan → Act → Verify → Loop 工作流
+
+### 2. 环境要求
+
+> **⚠ 仅支持 Windows，未兼容 Linux / macOS**
+
+原因：项目使用了 Windows 注册表自动启动、`ctypes.windll` 进程管理、PowerShell 启动脚本等 Windows 特有功能。
+
+### 3. 使用方式
+
+本质上相当于**换了一个 API 端点**，完美匹配现有 Agent 工作流：
+
+1. **运行启动脚本**：双击或运行 `run.ps1`，自动打开 Streamlit 控制面板
+2. **填写配置**：编辑 `~/.pavp/settings.json`，填入 plan_model / plan_api / plan_base_url 和 act_model / act_api / act_base_url（首次运行 `python -m pavp --init` 可生成模板）
+3. **启动代理**：在 UI 中点击 "Start Proxy"，或直接运行 `python -m pavp.proxy_server`
+4. **挂载到 Agent**：将 Agent 的 API 地址改为 `http://localhost:4001/v1`，API Key 改为 `sk-pavp-local`，模型名改为 `pavp`
+
+```python
+# Agent 配置示例
+base_url = "http://localhost:4001/v1"
+api_key  = "sk-pavp-local"
+model    = "pavp"
+```
+
+### 4. 关闭进程
+
+- **推荐方式**：在 Streamlit UI 中点击 "Stop Proxy"
+- **彻底关闭**：打开任务管理器，手动中止所有 python.exe 进程（或终止 `pavp.proxy_server` 相关进程）
+
+### 5. 作者使用情况
+
+- 当前仅在 **Trae** 中使用，未测试其他 Agent
+- Plan 额度消费至少降低了 **80%+**（使用廉价模型执行 Act，高能力模型仅用于 Plan/Verify）
+- 偶尔需要返工，需要编写详细的提示词
+- 大体可用，比直接使用普通模型要强
+
+### 6. 自举
+
+PAVP 可以自举——拉取源码后，用当前生产环境的 PAVP 来优化 PAVP 自身的代码。
+
+> 效果并不理想，但作者确实在这样做。
+
+### 7. 优势
+
+PAVP 从 Agent 视角看只是一个模型端点（`model="pavp"`），本质上是**单 Agent 架构**：
+
+- **相比多 Agent 协同**：避免了智能体之间交流产生的 token 消耗、注意力漂移和标记能力损耗（虽仍有少量损耗，但远低于多 Agent 方案）
+- **相比单 Agent + 顶级模型**：任务解决能力上无优势，但**省钱优势极大**——用廉价模型执行实际编码，高能力模型仅做规划和审查
+
+---
+
+## Project Introduction
+
+### 1. Architecture
+
+PAVP is essentially an **LLM orchestration layer** implemented as a local proxy:
+
+- **Plan**: A high-capability model (e.g., GLM-5.2) analyzes requirements and outputs a structured plan
+- **Act**: An execution model (e.g., DeepSeek V4 Flash) generates code following the plan, written to files via Claude Code
+- **Verify**: The high-capability model audits the code changes, outputting PASS / DO-NOT-SHIP (with DebugPlan) / INCOMPLETE (with NewPlan)
+- **Loop**: On failure, loops automatically or manually until passing or reaching max iterations
+
+Two modes:
+
+- **Proxy Mode** (recommended): Runs a local proxy server; the agent calls it via an OpenAI-compatible API, and PAVP transparently handles Plan → Act in the background
+- **Orchestrator Mode** (CLI): Runs the full Plan → Act → Verify → Loop workflow via `python -m pavp`
+
+### 2. Environment
+
+> **⚠ Windows only. Linux / macOS are NOT supported.**
+
+The project uses Windows-specific features: Registry auto-start via `winreg`, `ctypes.windll` for process management, PowerShell launcher scripts, etc.
+
+### 3. How to Use
+
+Essentially, you just **swap the API endpoint** — it fits perfectly into your existing agent workflow:
+
+1. **Run launcher**: Run `run.ps1` to open the Streamlit control panel
+2. **Configure**: Edit `~/.pavp/settings.json` — fill in plan_model / plan_api / plan_base_url and act_model / act_api / act_base_url (run `python -m pavp --init` first to generate a template)
+3. **Start proxy**: Click "Start Proxy" in the UI, or run `python -m pavp.proxy_server` directly
+4. **Mount to agent**: Point your agent to `http://localhost:4001/v1` with API key `sk-pavp-local` and model `pavp`
+
+```python
+# Agent configuration example
+base_url = "http://localhost:4001/v1"
+api_key  = "sk-pavp-local"
+model    = "pavp"
+```
+
+### 4. Stopping the Process
+
+- **Recommended**: Click "Stop Proxy" in the Streamlit UI
+- **Force kill**: Open Task Manager and manually terminate all python.exe processes (or kill those related to `pavp.proxy_server`)
+
+### 5. Author's Usage
+
+- Currently used **only in Trae**; not tested with other agents
+- Plan token consumption reduced by **80%+** (cheap model for Act, capable model only for Plan/Verify)
+- Occasional rework needed; detailed prompts are required
+- Generally usable and better than using a raw cheap model directly
+
+### 6. Bootstrapping
+
+PAVP is self-bootstrapping — pull the source code and use the production PAVP to optimize PAVP's own code.
+
+> The results are not great, but the author does it anyway.
+
+### 7. Advantage
+
+From the agent's perspective, PAVP is just a single model endpoint (`model="pavp"`) — it's a **single-agent architecture**:
+
+- **vs. Multi-Agent**: Avoids token waste, attention drift, and marking capability loss caused by inter-agent communication (some loss remains, but far less than multi-agent setups)
+- **vs. Single Agent + Top-Tier Model**: No advantage in task-solving capability, but **massive cost savings** — cheap models do the actual coding, while capable models only handle planning and review
+
+---
+
+## Quick Start
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Generate settings template
+python -m pavp --init
+
+# 3. Edit ~/.pavp/settings.json with your API keys
+
+# 4. Run the proxy server
+python -m pavp.proxy_server
+
+# 5. Or run the Streamlit UI (via run.ps1 or directly)
+streamlit run pavp/ui.py
+```
+
+## Project Structure
+
+```
+PAVP/
+├── pavp/
+│   ├── __init__.py          # Package init, version
+│   ├── __main__.py          # Entry: python -m pavp
+│   ├── cli.py               # CLI entry point
+│   ├── proxy_server.py      # FastAPI proxy (Plan → Act)
+│   ├── orchestrator.py      # State machine (Plan → Act → Verify → Loop)
+│   ├── engine.py            # LLM calling utilities
+│   ├── act_executor.py      # Claude Code subprocess executor
+│   ├── prompts.py           # Prompt templates for all phases
+│   ├── models.py            # Pydantic data models
+│   ├── settings.py          # Settings loader (~/.pavp/settings.json)
+│   ├── storage.py           # SQLite session persistence
+│   ├── ui.py                # Streamlit control panel
+│   └── auto_start.py        # Windows Registry auto-start
+├── run.ps1                  # PowerShell launcher
+├── requirements.txt
+└── README.md
+```
+
+

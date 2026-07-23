@@ -1,0 +1,43 @@
+# PAVP generated / log files
+log/
+*.log
+
+# Documentation (generated/archived)
+docs/
+
+# Python cache (redirected under log/)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# IDE / editor
+.vscode/
+.idea/
+.trae/
+*.swp
+*.swo
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Temporary generated files
+temp_motion.axaml
+temp_motion_uc.txt
+
+# Streamlit local config
+.streamlit/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.pytest_cache/
