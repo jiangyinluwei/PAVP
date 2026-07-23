@@ -136,23 +136,6 @@ def run_act(plan: Plan, project_root: str, workdir: str) -> ActResult:
     )
 
 
-def rollback_act(workdir: str, pre_sha: Optional[str]) -> None:
-    """失败时回滚到 Act 前 commit（保留未提交改动到 stash 便于事后排查）"""
-    if not pre_sha:
-        return
-    try:
-        subprocess.run(
-            ["git", "stash", "create"], cwd=workdir,
-            capture_output=True, text=True, encoding="utf-8",
-        )
-        subprocess.run(
-            ["git", "reset", "--hard", pre_sha], cwd=workdir,
-            capture_output=True, text=True, encoding="utf-8",
-        )
-    except Exception:
-        pass  # 回滚失败不阻塞主流程
-
-
 # ---------------------------------------------------------------------
 # 内部辅助
 # ---------------------------------------------------------------------

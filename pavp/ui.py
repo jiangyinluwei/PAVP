@@ -666,6 +666,8 @@ def _status_html() -> str:
 
     fsm = state.get("fsm_state", "")
     iteration = state.get("iteration", 0)
+    task_key_count = state.get("task_key_count", 0)
+    task_key_sample = state.get("task_key_sample", "")
 
     # DONE / FAILED 表示请求真正完成
     if fsm in ("DONE", "FAILED"):
@@ -696,8 +698,15 @@ def _status_html() -> str:
         "AWAITING_USER":("Verify", "#F5DEB3"),  # also part of Verify
     }
     display, color = _M.get(fsm, (fsm, "inherit"))
+
+    # 构建 task_key 前缀：&N TK-xxx （仅当有 task_key 时显示）
+    task_key_prefix = ""
+    if task_key_count > 0 and task_key_sample:
+        task_key_prefix = f'<span class="pavp-loop">&{task_key_count}</span> <span class="pavp-phase" style="color:#888;">{task_key_sample}</span> '
+
     return (
         f'<span class="pavp-status">'
+        f'{task_key_prefix}'
         f'<span class="pavp-loop">#{iteration}</span> '
         f'<span class="pavp-phase" style="color:{color};">{display}</span>'
         f'</span>'

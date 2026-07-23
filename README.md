@@ -21,10 +21,11 @@ PAVP 本质上是一个 **LLM 编排层**，通过本地代理服务实现：
 - **Verify**：用高能力模型审计代码改动，输出 PASS / DO-NOT-SHIP（含 DebugPlan）/ INCOMPLETE（含 NewPlan）
 - **Loop**：失败时自动或手动循环，直到通过或达到最大迭代次数
 
-架构分为两种模式：
+每个新任务会生成唯一 `task_key`（如 `TK-a1b2c3d4`），Plan 模型输出到 JSON 中，用于跨轮次锚定上下文、缓存隔离和状态追踪。
+
+架构说明：
 
 - **Proxy 模式**（推荐）：运行本地代理服务，Agent 直接通过 OpenAI 兼容接口调用，PAVP 在后台透明完成 Plan → Act
-- **Orchestrator 模式**（CLI）：通过 `python -m pavp` 运行完整 Plan → Act → Verify → Loop 工作流
 
 ### 2. 环境要求
 
@@ -36,8 +37,8 @@ PAVP 本质上是一个 **LLM 编排层**，通过本地代理服务实现：
 
 本质上相当于**换了一个 API 端点**，完美匹配现有 Agent 工作流：
 
-1. **运行启动脚本**：双击或运行 `run.ps1`，自动打开 Streamlit 控制面板
-2. **填写配置**：编辑 `~/.pavp/settings.json`，填入 plan_model / plan_api / plan_base_url 和 act_model / act_api / act_base_url（首次运行 `python -m pavp --init` 可生成模板）
+1. **运行启动脚本**：双击或运行 `run.ps1`，自动检查 Python 环境（python 版本、依赖包）并安装缺失项，然后打开 Streamlit 控制面板
+2. **填写配置**：编辑 `~/.pavp/settings.json`，填入 plan_model / plan_api / plan_base_url 和 act_model / act_api / act_base_url（运行 `run.ps1` 时自动生成模板）
 3. **启动代理**：在 UI 中点击 "Start Proxy"，或直接运行 `python -m pavp.proxy_server`
 4. **挂载到 Agent**：将 Agent 的 API 地址改为 `http://localhost:4001/v1`，API Key 改为 `sk-pavp-local`，模型名改为 `pavp`
 
@@ -86,10 +87,11 @@ PAVP is essentially an **LLM orchestration layer** implemented as a local proxy:
 - **Verify**: The high-capability model audits the code changes, outputting PASS / DO-NOT-SHIP (with DebugPlan) / INCOMPLETE (with NewPlan)
 - **Loop**: On failure, loops automatically or manually until passing or reaching max iterations
 
-Two modes:
+Each new task generates a unique `task_key` (e.g. `TK-a1b2c3d4`) in the Plan JSON, used for cross-turn context anchoring, cache isolation, and state tracking.
+
+Two modes (only Proxy Mode is maintained):
 
 - **Proxy Mode** (recommended): Runs a local proxy server; the agent calls it via an OpenAI-compatible API, and PAVP transparently handles Plan → Act in the background
-- **Orchestrator Mode** (CLI): Runs the full Plan → Act → Verify → Loop workflow via `python -m pavp`
 
 ### 2. Environment
 
@@ -101,8 +103,8 @@ The project uses Windows-specific features: Registry auto-start via `winreg`, `c
 
 Essentially, you just **swap the API endpoint** — it fits perfectly into your existing agent workflow:
 
-1. **Run launcher**: Run `run.ps1` to open the Streamlit control panel
-2. **Configure**: Edit `~/.pavp/settings.json` — fill in plan_model / plan_api / plan_base_url and act_model / act_api / act_base_url (run `python -m pavp --init` first to generate a template)
+1. **Run launcher**: Run `run.ps1` — it auto-checks the Python environment (python version, dependencies) and installs missing packages, then opens the Streamlit control panel
+2. **Configure**: Edit `~/.pavp/settings.json` — fill in plan_model / plan_api / plan_base_url and act_model / act_api / act_base_url (run `run.ps1` to auto-generate a template)
 3. **Start proxy**: Click "Start Proxy" in the UI, or run `python -m pavp.proxy_server` directly
 4. **Mount to agent**: Point your agent to `http://localhost:4001/v1` with API key `sk-pavp-local` and model `pavp`
 
@@ -146,15 +148,12 @@ From the agent's perspective, PAVP is just a single model endpoint (`model="pavp
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Generate settings template
-python -m pavp --init
+# 2. Edit ~/.pavp/settings.json with your API keys
 
-# 3. Edit ~/.pavp/settings.json with your API keys
-
-# 4. Run the proxy server
+# 3. Run the proxy server
 python -m pavp.proxy_server
 
-# 5. Or run the Streamlit UI (via run.ps1 or directly)
+# 4. Or run the Streamlit UI (via run.ps1 or directly)
 streamlit run pavp/ui.py
 ```
 
@@ -164,8 +163,6 @@ streamlit run pavp/ui.py
 PAVP/
 ├── pavp/
 │   ├── __init__.py          # Package init, version
-│   ├── __main__.py          # Entry: python -m pavp
-│   ├── cli.py               # CLI entry point
 │   ├── proxy_server.py      # FastAPI proxy (Plan → Act)
 │   ├── orchestrator.py      # State machine (Plan → Act → Verify → Loop)
 │   ├── engine.py            # LLM calling utilities

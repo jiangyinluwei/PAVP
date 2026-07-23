@@ -22,8 +22,6 @@ Schema:
 }
 
 模型标识格式: provider/model，如 deepseek/deepseek-reasoner、openai/gpt-4o-mini。
-
-生成模板: python -m pavp --init
 """
 from __future__ import annotations
 
@@ -67,8 +65,7 @@ def load() -> dict[str, Any]:
     p = settings_path()
     if not p.exists():
         raise SettingsError(
-            f"未找到设置文件 {p}。请运行: python -m pavp --init 生成模板，"
-            "再填入密钥。"
+            f"未找到设置文件 {p}。请手动创建该文件并填入密钥。"
         )
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
@@ -106,16 +103,4 @@ def save_field(key: str, value: Any) -> None:
     )
 
 
-def init_template() -> Path:
-    """若 settings.json 不存在则写入模板；已存在则不覆盖。返回路径。"""
-    p = settings_path()
-    if p.exists():
-        raise SettingsError(
-            f"{p} 已存在，为避免覆盖你的密钥未写入。如需重置请先手动删除。"
-        )
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(
-        json.dumps(TEMPLATE, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return p
+

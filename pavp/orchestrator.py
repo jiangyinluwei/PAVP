@@ -58,11 +58,6 @@ def _write_state_file(state: SessionState) -> None:
     _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
-def _clear_state_file() -> None:
-    """清除状态文件（编排器退出时调用）。"""
-    _STATE_FILE.unlink(missing_ok=True)
-
-
 class Orchestrator:
     """PAVP 工作流编排器。
 
@@ -96,15 +91,13 @@ class Orchestrator:
                        None 时从 settings.json 读取，默认 "auto"。
             on_event: 阶段事件回调（用于 UI/日志）
             decide: AWAITING_USER 时的决策回调，返回 "continue" / "ignore"。
-                    默认用 CLI input() 询问。
+                    不提供则默认 continue（自动继续）。
         """
         state = SessionState(
             session_id=uuid.uuid4().hex[:12],
             original_requirement=requirement,
             max_iterations=max_iterations,
         )
-        decide = decide or _cli_decide
-
         # 读取 loop_mode（手动/自动）
         if loop_mode is None:
             try:
@@ -280,7 +273,10 @@ class Orchestrator:
                     {"iteration": state.iteration, "verify": verify.model_dump(mode="json")},
                     state=state,
                 )
-                decision = decide(verify, state)
+                if decide is None:
+                    decision = "continue"
+                else:
+                    decision = decide(verify, state)
 
             if decision != "continue":
                 state.fsm_state = "DONE"
@@ -429,33 +425,6 @@ class Orchestrator:
         # 每次事件发射时同步状态文件（供 UI 实时读取）
         if state is not None:
             _write_state_file(state)
-
-
-# ---------------------------------------------------------------------
-# 默认 CLI 决策
-# ---------------------------------------------------------------------
-def _cli_decide(verify: VerifyResult, state: SessionState) -> str:
-    print("\n" + "=" * 60)
-    print(f"Verify 裁决: {verify.verdict.value}")
-    print(f"摘要: {verify.summary}")
-    for i, issue in enumerate(verify.issues, 1):
-        print(
-            f"  [{i}] {issue.severity} {issue.file}:{issue.line or '?'} - "
-            f"{issue.failure_scenario}"
-        )
-    plan = verify.debug_plan or verify.new_plan
-    plan_label = "DebugPlan" if verify.debug_plan else "NewPlan"
-    if plan:
-        print(f"\n{plan_label} 摘要:", plan.summary)
-        for t in plan.tasks:
-            print(f"  - {t.id}: {t.title}")
-    print("=" * 60)
-    while True:
-        ans = input(f"按 {plan_label} 继续 Act? [y]es / [n]o 忽略: ").strip().lower()
-        if ans in ("y", "yes", "continue"):
-            return "continue"
-        if ans in ("n", "no", "ignore"):
-            return "ignore"
 
 
 # ---------------------------------------------------------------------

@@ -12,10 +12,10 @@ The proxy never executes tools. All tool execution is by the agent.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import hashlib
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -35,10 +35,17 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .engine import make_plan, plan_requires_act, _call_llm_raw, _call_llm_stream, _call_llm_text, build_pvap_stage
 from .settings import load as load_settings, settings_path, DEFAULT_PORT
 
-# In-memory plan cache: key = sha256(first_user_msg), value = plan_json_str
-_plan_cache: dict[str, str] = {}
+# In-memory plan cache: ckey -> {"plan": plan_json_str, "task_key": str}
+_plan_cache: dict[str, dict] = {}
 
-# Tracks cache keys for which the Act phase has already been started (first response sent).
+# Tracks active task_keys with their last-used timestamps for auto-cleanup.
+# task_key -> {"last_used": float}
+_task_cache: dict[str, dict] = {}
+
+# Stale task timeout in seconds — tasks idle longer than this are evicted.
+_TASK_TIMEOUT = 600
+
+# Tracks compound keys for which the Act phase has already been started (first response sent).
 # Used to distinguish "pvap Act..." (first turn) from "pvap Continue..." (follow-up turns).
 _act_started: set[str] = set()
 
@@ -62,6 +69,10 @@ def _update_proxy_state(fsm_state: str, iteration: int = 0, *, last_api_call: st
         "updated_at": now,
         "last_api_call": last_api_call or now,
     }
+    # 添加 task_key 信息（总数 + 随机采样），供 UI 展示 &N TK-xxx#N State 格式
+    if _task_cache:
+        data["task_key_count"] = len(_task_cache)
+        data["task_key_sample"] = random.choice(list(_task_cache.keys()))
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
@@ -155,6 +166,47 @@ def _cache_key(messages: list[dict]) -> str:
     """
     anchor = _current_anchor(messages)
     return hashlib.sha256(anchor.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _extract_task_key(plan_json: str) -> str:
+    """Extract task_key from Plan model's JSON output.
+
+    Returns the task_key if present, otherwise generates a fallback key.
+    The Plan model is instructed to include a unique task_key for each new task.
+    """
+    try:
+        data = json.loads(plan_json)
+        tk = data.get("task_key", "")
+        if tk and isinstance(tk, str) and tk.startswith("TK-"):
+            return tk
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Fallback: generate a unique key
+    return f"TK-{uuid.uuid4().hex[:8]}"
+
+
+def _cleanup_stale_tasks() -> None:
+    """Evict task_keys and their cached plans that have been idle for > _TASK_TIMEOUT.
+
+    Called on each request to prevent memory leak from abandoned tasks.
+    """
+    now = time.time()
+    stale_keys = [
+        tk for tk, info in _task_cache.items()
+        if now - info["last_used"] > _TASK_TIMEOUT
+    ]
+    if not stale_keys:
+        return
+    for tk in stale_keys:
+        del _task_cache[tk]
+        # Remove all _plan_cache entries with this task_key
+        stale_ckeys = [ck for ck, v in _plan_cache.items()
+                       if isinstance(v, dict) and v.get("task_key") == tk]
+        for ck in stale_ckeys:
+            compound = f"{tk}:{ck}"
+            _act_started.discard(compound)
+            del _plan_cache[ck]
+    print(f"[PAVP] Cleaned {len(stale_keys)} stale task(s), removed {len(stale_ckeys)} plan(s)", flush=True)
 
 
 def _extract_project_root(messages: list[dict]) -> str:
@@ -312,10 +364,19 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             # follow-ups reuse the anchor's plan while a new independent
             # request becomes a new anchor -> fresh plan. Only Act plans are
             # cached, so a no-act greeting/Q&A can never poison later turns.
+            #
+            # The Plan model generates a unique task_key for each new task.
+            # task_key is used to isolate caches per task and to anchor
+            # context across multiple turns of the same task.
             if ckey in _plan_cache:
-                plan = _plan_cache[ckey]
+                cached = _plan_cache[ckey]
+                plan = cached["plan"]
+                task_key = cached["task_key"]
                 needs_act = plan_requires_act(plan)
-                print(f"[PAVP] Plan (cached, turn {turn_count}): {plan[:100]}...", flush=True)
+                # Update last-used timestamp for this task
+                if task_key in _task_cache:
+                    _task_cache[task_key]["last_used"] = time.time()
+                print(f"[PAVP] Plan (cached, task_key={task_key}, turn {turn_count}): {plan[:100]}...", flush=True)
                 _update_proxy_state("ACTING", turn_count + 1)
             else:
                 print(f"[PAVP] Planning (turn {turn_count}): {prompt[:60]}...", flush=True)
@@ -327,9 +388,24 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     _plan_stop.set()
                 needs_act = plan_requires_act(plan)
                 if needs_act:
-                    _plan_cache[ckey] = plan
-                print(f"[PAVP] Plan done: {plan[:120]}", flush=True)
+                    # Extract task_key from Plan model's JSON output
+                    task_key = _extract_task_key(plan)
+                    # Ensure uniqueness: if the key somehow collides, generate a fallback
+                    if task_key in _task_cache:
+                        task_key = f"TK-{uuid.uuid4().hex[:8]}"
+                    _task_cache[task_key] = {"last_used": time.time()}
+                    _plan_cache[ckey] = {"plan": plan, "task_key": task_key}
+                else:
+                    # Plan-only (no Act): no task_key needed
+                    task_key = ""
+                print(f"[PAVP] Plan done: task_key={task_key}, plan={plan[:120]}", flush=True)
                 _update_proxy_state("ACTING", turn_count + 1)
+
+            # Clean up stale tasks periodically
+            _cleanup_stale_tasks()
+
+            # Compound key for act_started tracking: task_key + ckey
+            compound_key = f"{task_key}:{ckey}" if task_key else ckey
 
             if needs_act and not s.get("act_model"):
                 return JSONResponse(status_code=502, content={"error": {"message": "Act model not configured"}})
@@ -343,14 +419,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             # If the last assistant message had no tool_calls, the workflow is complete.
             if not needs_act:
                 pavp_stage = build_pvap_stage("plan")
-            elif ckey in _act_started:
+            elif compound_key in _act_started:
                 if _is_finish_turn(messages):
                     pavp_stage = build_pvap_stage("act", is_finish=True)
                 else:
                     pavp_stage = build_pvap_stage("act", is_continue=True)
             else:
                 pavp_stage = build_pvap_stage("act")
-                _act_started.add(ckey)
+                _act_started.add(compound_key)
 
             # ---- Plan-only (no Act needed): route to act model directly ----
             if not needs_act:
@@ -370,6 +446,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                             "id": response_id, "object": "chat.completion.chunk",
                             "created": int(time.time()), "model": model_name,
                             "choices": [{"index": 0, "delta": {"role": "assistant", "content": f"{pavp_stage}\n\n"}, "finish_reason": None}],
+                            "task_key": task_key,
                         }
                         yield f"data: {json.dumps(initial, ensure_ascii=False)}\n\n"
                         role_sent = True
@@ -397,6 +474,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                                 chunk["id"] = response_id
                                 chunk["model"] = model_name
                                 chunk["pavp_stage"] = pavp_stage
+                                chunk["task_key"] = task_key
                                 if not role_sent:
                                     delta = chunk.get("choices", [{}])[0].get("delta", {})
                                     if delta.get("role") is None:
@@ -430,6 +508,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                                  "finish_reason": resp["choices"][0].get("finish_reason", "stop")}],
                     "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                     "pavp_stage": pavp_stage,
+                    "task_key": task_key,
                 }
 
             # ---- Normal mode: Phase 2: Act ----
@@ -446,6 +525,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                         "id": response_id, "object": "chat.completion.chunk",
                         "created": int(time.time()), "model": model_name,
                         "choices": [{"index": 0, "delta": {"role": "assistant", "content": f"{pavp_stage}\n\n"}, "finish_reason": None}],
+                        "task_key": task_key,
                     }
                     yield f"data: {json.dumps(initial, ensure_ascii=False)}\n\n"
                     role_sent = True
@@ -474,6 +554,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                             chunk["id"] = response_id
                             chunk["model"] = model_name
                             chunk["pavp_stage"] = pavp_stage
+                            chunk["task_key"] = task_key
                             # Ensure first delta has role: "assistant"
                             if not role_sent:
                                 delta = chunk.get("choices", [{}])[0].get("delta", {})
@@ -497,7 +578,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 _act_stop.set()
             msg = resp["choices"][0]["message"]
             # If the act model responded without tool_calls, the workflow is complete.
-            if not msg.get("tool_calls") and ckey in _act_started:
+            if not msg.get("tool_calls") and compound_key in _act_started:
                 pavp_stage = build_pvap_stage("act", is_finish=True)
                 print(f"[PAVP] Act finished: no tool_calls, pavp_stage={pavp_stage!r}", flush=True)
             # Inject pavp_stage into assistant message content so agent sees it
@@ -517,6 +598,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                              "finish_reason": resp["choices"][0].get("finish_reason", "stop")}],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                 "pavp_stage": pavp_stage,
+                "task_key": task_key,
             }
 
         except Exception as e:

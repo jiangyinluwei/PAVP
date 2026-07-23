@@ -2,7 +2,6 @@
 # M1-M3 (代理层 + 编排器 + Act 执行器 + CLI)
 httpx>=0.27
 pydantic>=2.7
-pyyaml>=6.0
 
 # M5 UI
 streamlit>=1.40

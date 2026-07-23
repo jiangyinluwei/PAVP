@@ -8,8 +8,6 @@ Verify: (future) triggered by conversation state
 from __future__ import annotations
 
 import json
-import time
-from dataclasses import dataclass
 from typing import Any, Optional
 
 import httpx
@@ -22,6 +20,7 @@ Rules:
 1. Only output the plan. Do NOT write code.
 2. Output valid JSON following this schema:
    {
+     "task_key": "TK-a1b2c3d4",
      "summary": "one-line plan summary",
      "reasoning": "Thinking process: requirement analysis, tech selection, trade-offs, risks",
      "tech_stack": ["Python 3.10+", "FastAPI", "SQLAlchemy 2.0"],
@@ -57,16 +56,12 @@ Rules:
    - "tech_stack" field: the tech stack involved (framework, library, tool, version)
    - "implementation_logic" field: the implementation logic (algorithm, data structure, design pattern, core flow)
    - Top-level "tech_stack" field summarizes the overall tech stack
+8. [TASK KEY]: Every new task MUST include a unique "task_key" field (e.g., "TK-a1b2c3d4").
+   The task_key is a short identifier that anchors the plan across multiple execution turns.
+   It must be unique for each new task. Use random 8-character hex suffix after "TK-".
+   The task_key field goes at the top level of the JSON output.
+   When the Act model receives this plan, it will use the task_key to maintain context continuity.
 """
-
-ACT_HINT = (
-    "\n\n[PAVP Plan]\n{plan}"
-    "\n\nWhen executing the plan above, use available agent-delegation tools "
-    "(e.g. Task, subagent) to dispatch independent subtasks in parallel "
-    "for efficiency. Each subtask assigned to a sub-agent should be "
-    "self-contained with clear inputs and expected outputs."
-)
-
 
 def build_pvap_stage(
     stage: str,
@@ -99,14 +94,6 @@ def build_pvap_stage(
             return f"pvap Loop {loop}..."
         return "pvap Start..."
     return ""
-
-
-@dataclass
-class PAVPResult:
-    plan: str = ""
-    success: bool = False
-    error: Optional[str] = None
-    elapsed: float = 0.0
 
 
 def _call_llm_raw(

@@ -15,6 +15,7 @@ PLAN_SYSTEM = """你是一名资深架构师，负责制定编码执行计划。
 1. 【禁止修改任何代码或文件】，只输出计划
 2. 输出必须是合法 JSON，schema 如下：
    {
+     "task_key": "TK-a1b2c3d4",
      "summary": "计划一句话摘要",
      "reasoning": "思考过程：需求分析、技术选型、方案权衡、潜在风险",
      "tech_stack": ["整体技术栈，如Python 3.10+", "FastAPI", "SQLAlchemy 2.0"],
@@ -58,6 +59,10 @@ PLAN_SYSTEM = """你是一名资深架构师，负责制定编码执行计划。
     - "tech_stack" 字段：标明该任务涉及的技术栈（框架、库、工具及版本）
     - "implementation_logic" 字段：阐明实现逻辑（算法、数据结构、设计模式、核心逻辑流程）
     - 顶级 "tech_stack" 字段汇总整个项目涉及的技术栈概览
+11. 【TASK KEY】：每个新任务必须包含一个唯一的 "task_key" 字段（如 "TK-a1b2c3d4"）。
+    task_key 是一个短标识符，用于在多次执行轮次中锚定上下文。
+    每个新任务必须使用不同的 task_key。推荐格式："TK-" + 8 位随机十六进制字符。
+    task_key 位于 JSON 输出的顶层。Act 模型收到此计划后，会使用 task_key 保持上下文连续性。
 """
 
 

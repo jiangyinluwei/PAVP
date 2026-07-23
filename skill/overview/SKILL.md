@@ -63,10 +63,9 @@ Core idea: use high-power reasoning models for Plan/Verify, use coding models fo
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Two Operation Modes
+### Operation Mode
 
-1. **Orchestrator Mode (CLI / Full Workflow)**: `python -m pavp "requirement"` -> Orchestrator drives full Plan->Act->Verify->Loop
-2. **Proxy Mode (Proxy Server)**: `proxy_server.py` acts as a FastAPI proxy, intercepting Agent LLM requests for Plan-Act routing (without Verify loop)
+1. **Proxy Mode (Proxy Server)**: `proxy_server.py` acts as a FastAPI proxy, intercepting Agent LLM requests for Plan-Act routing (without Verify loop)
 
 ---
 
@@ -76,8 +75,6 @@ Core idea: use high-power reasoning models for Plan/Verify, use coding models fo
 PAVP/
 ├── pavp/
 │   ├── __init__.py          # Package init, __version__ = "0.1.0"
-│   ├── __main__.py          # python -m pavp entry
-│   ├── cli.py               # CLI commands (--init/--check/--sessions/--resume/run)
 │   ├── settings.py          # ~/.pavp/settings.json read/write
 │   ├── models.py            # Pydantic models (Plan/VerifyResult/ActResult/SessionState etc.)
 │   ├── prompts.py           # Plan/Act/Verify phase prompt templates
@@ -183,10 +180,6 @@ Model identifier format: `provider/model` (e.g. `openai/gpt-4o-mini`, `deepseek/
 | Method | Command | Description |
 |---|---|---|
 | UI Launch | `.\run.ps1` | Start Streamlit config panel, proxy runs in background |
-| CLI Run | `python -m pavp "requirement" -p D:/repo` | Run full workflow |
-| Environment Check | `python -m pavp --check` | Check dependencies/config/proxy/CC |
-| Init Config | `python -m pavp --init` | Generate settings.json template |
-| Session Management | `python -m pavp --sessions` | List/resume/delete sessions |
 
 ---
 

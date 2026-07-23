@@ -181,38 +181,6 @@ def session_to_markdown(state: SessionState) -> str:
 
 ---
 
-### Task 2: Add export command to CLI
-
-**File:** `pavp/cli.py`
-
-**Operation:** Add `--export <session-id>` argument
-
-**Code:**
-```python
-# In main() argparse section add
-p.add_argument("--export", metavar="SESSION_ID",
-               help="Export specified session as Markdown file")
-
-# In argument handling add
-if args.export:
-    from .export import session_to_markdown
-    state = pavp_storage.load(args.export)
-    if not state:
-        print(f"Session {args.export} does not exist")
-        return 1
-    md = session_to_markdown(state)
-    out_file = Path(f"pavp_session_{args.export}.md")
-    out_file.write_text(md, encoding="utf-8")
-    print(f"Exported: {out_file}")
-    return 0
-```
-
-**Verification:**
-- [ ] `python -m pavp --help` shows `--export` option
-- [ ] Exported file contains all session phases
-
----
-
 ### Task 3: Add export button to UI
 
 **File:** `pavp/ui.py`
@@ -296,21 +264,6 @@ def build_{stage}_user_prompt(...) -> str:
 - [ ] Consistent with existing prompt style
 ```
 
-### Adding a New CLI Command
-
-```markdown
-### Task: Add {command name} CLI command
-
-**File:** `pavp/cli.py`
-
-**Operation:** Add argument to argparse, add handling branch in main()
-
-**Key checks:**
-- [ ] `python -m pavp --help` shows new option
-- [ ] Does not affect existing commands (--check/--init/--sessions/--resume)
-- [ ] Return code correct (0 success, 1 failure)
-```
-
 ### Adding a New Streamlit UI Component
 
 ```markdown
@@ -340,7 +293,6 @@ def build_{stage}_user_prompt(...) -> str:
 - [ ] YAML syntax correct
 - [ ] New models use `os.environ/` environment variable references
 - [ ] `start_proxy.ps1` starts normally
-- [ ] `python -m pavp --check` passes
 ```
 
 ### Adding a New Python Dependency
