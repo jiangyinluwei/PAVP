@@ -118,7 +118,7 @@ The `-g` flag installs globally (user-level) and `-y` skips confirmation prompts
 
 ## PAVP Project Existing Skills
 
-The `skill/` directory already contains these skills, no external search needed:
+The `pavp_skill/` directory already contains these skills, no external search needed:
 
 | Skill | Description | Trigger Condition |
 |---|---|---|
