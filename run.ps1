@@ -29,7 +29,7 @@ if (-not (Test-Path $settingsPath)) {
     $template = @'
 {
   "litellm_master_key": "sk-pavp-local",
-  "proxy_port": 4001,
+  "proxy_port": 5401,
   "plan_api": "",
   "plan_base_url": "",
   "plan_model": "",
@@ -41,7 +41,8 @@ if (-not (Test-Path $settingsPath)) {
   "act_max_turns": 40,
   "act_timeout": 600,
   "loop_mode": "auto",
-  "auto_start": true
+  "auto_start": true,
+  "auto_start_ui": false
 }
 '@
     $settingsDir = Join-Path $HOME ".pavp"

@@ -85,7 +85,7 @@ PAVP/
 │   ├── storage.py           # SQLite session persistence (sessions.db)
 │   ├── ui.py                # Streamlit UI config panel + proxy launcher
 │   └── auto_start.py        # Windows auto-start via registry Run key
-├── skill/                   # Project skill folder
+├── pavp_skill/              # Project skill folder
 │   ├── find-skills/SKILL.md
 │   ├── writing-plans/SKILL.md
 │   ├── overview/SKILL.md

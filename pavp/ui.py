@@ -150,55 +150,30 @@ def _clear_manual_stop():
 
 
 def _start_proxy(port: int):
-    """Start proxy as detached background process"""
+    """Start proxy as detached background process.
+
+    The proxy auto-finds a free port (starting from *port*) and updates
+    settings.json. After startup, we re-read settings to get the actual port.
+    """
     # 用户主动启动代理时，清除手动停止标记
     _clear_manual_stop()
 
-    # Remove stale PID file before starting
-    _PID_FILE.unlink(missing_ok=True)
-
-    # Kill any process already on this port
-    try:
-        import subprocess as sp
-        if sys.platform == "win32":
-            conns = sp.run(["netstat", "-ano"], capture_output=True, text=True)
-            for line in conns.stdout.splitlines():
-                if f":{port}" in line and "LISTENING" in line:
-                    parts = line.split()
-                    if parts:
-                        pid = parts[-1]
-                        sp.run(["taskkill", "/PID", pid, "/F"], capture_output=True)
-    except Exception:
-        pass
-
-    # Wait for the port to become free (poll up to 5s)
-    def _port_free():
-        import socket as _s
+    # Stop old proxy by PID if one is running
+    old_pid = _read_pid()
+    if old_pid:
         try:
-            _sock = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
-            _sock.settimeout(1)
-            _sock.bind(("127.0.0.1", port))
-            _sock.close()
-            return True
-        except OSError:
-            return False
-
-    if not _wait_until(_port_free, timeout=5.0, interval=0.2):
-        # Port is still in use — try harder to kill
-        try:
-            import subprocess as sp
-            sp.run(["taskkill", "/F", "/IM", "python.exe"],
-                   capture_output=True)
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/PID", str(old_pid), "/F", "/T"],
+                               capture_output=True, text=True)
+            else:
+                os.kill(old_pid, signal.SIGTERM)
         except Exception:
             pass
-        if not _wait_until(_port_free, timeout=3.0, interval=0.3):
-            st.session_state.proxy_start_error = (
-                f"Port {port} is still in use after killing existing processes. "
-                f"A non-PAVP service may be listening on this port, or the "
-                f"previous proxy instance did not shut down cleanly. "
-                f"Try changing the port in settings, or reboot."
-            )
-            return
+        _PID_FILE.unlink(missing_ok=True)
+        _wait_until(lambda: not _pid_alive(old_pid), timeout=3.0, interval=0.1)
+
+    # Remove stale PID file before starting
+    _PID_FILE.unlink(missing_ok=True)
 
     # Use python.exe (not pythonw.exe) for proxy subprocess: pythonw has no
     # stdout by default, which breaks sys.stdout.reconfigure in proxy_server.
@@ -251,6 +226,17 @@ def _start_proxy(port: int):
         # Clear any previous startup error on successful process launch
         st.session_state.proxy_start_error = None
 
+        # Re-read settings to get the actual port (proxy may have auto-incremented)
+        try:
+            new_settings = load_settings()
+            actual_port = new_settings.get("proxy_port", port)
+            if actual_port != port:
+                st.session_state.proxy_port = actual_port
+                port = actual_port
+                st.session_state.settings_cache = new_settings
+        except Exception:
+            pass
+
         # Wait for proxy HTTP server to become ready (up to 10s)
         _http_ready = False
         for _ in range(20):
@@ -263,7 +249,7 @@ def _start_proxy(port: int):
             log_file.close()
             st.session_state.proxy_start_error = (
                 f"Proxy process started but HTTP server did not become "
-                f"reachable within 10s. Check log at {_LOG_FILE}"
+                f"reachable within 10s on port {port}. Check log at {_LOG_FILE}"
             )
             return
 
@@ -774,9 +760,25 @@ if "proxy_port" not in st.session_state:
 # Check real proxy status (not session state)
 proxy_alive, proxy_ready = _is_proxy_running(st.session_state.proxy_port)
 
+# Auto-sync port: if the running proxy is on a different port than settings,
+# update settings.json and session state to match the actual port.
+_PORT_FILE = Path.home() / ".pavp" / "proxy_port.txt"
+try:
+    if _PORT_FILE.exists():
+        _actual_port = int(_PORT_FILE.read_text().strip())
+        _cfg_port = st.session_state.settings_cache.get("proxy_port", DEFAULT_PORT)
+        if _actual_port != _cfg_port:
+            save_field("proxy_port", _actual_port)
+            st.session_state.settings_cache = load_settings()
+            st.session_state.proxy_port = _actual_port
+            proxy_alive, proxy_ready = _is_proxy_running(_actual_port)
+except Exception:
+    pass
+
 # Sync auto-start setting to registry (always sync to ensure command is up-to-date)
 _auto_start_val = st.session_state.settings_cache.get("auto_start", True)
-set_auto_start(_auto_start_val, st.session_state.proxy_port)
+_auto_start_ui_val = st.session_state.settings_cache.get("auto_start_ui", False)
+set_auto_start(_auto_start_val, st.session_state.proxy_port, _auto_start_ui_val)
 
 # Auto-start proxy on boot if auto-start is enabled and proxy is not running
 if "auto_start_attempted" not in st.session_state:
@@ -868,7 +870,20 @@ with _s_lcol2:
     st.markdown(f"**{'On' if _auto_start_on else 'Off'}**")
 if _auto_start_on != _current_auto_start:
     save_field("auto_start", _auto_start_on)
-    set_auto_start(_auto_start_on, st.session_state.proxy_port)
+    set_auto_start(_auto_start_on, st.session_state.proxy_port, _auto_start_ui_val)
+    st.session_state.settings_cache = load_settings()
+    st.rerun()
+
+# --- Auto-start UI toggle (only visible when Auto Start is ON) ---
+_current_auto_start_ui = s.get("auto_start_ui", False)
+_sui_spacer, _sui_lcol1, _sui_lcol2 = st.sidebar.columns([0.04, 0.2, 0.76], vertical_alignment="center", gap="small")
+with _sui_lcol1:
+    _auto_start_ui_on = st.toggle("", value=_current_auto_start_ui, key="auto_start_ui_toggle", label_visibility="collapsed", disabled=not _auto_start_on)
+with _sui_lcol2:
+    st.markdown(f"**UI {'On' if _auto_start_ui_on else 'Off'}**")
+if _auto_start_ui_on != _current_auto_start_ui:
+    save_field("auto_start_ui", _auto_start_ui_on)
+    set_auto_start(_auto_start_on, st.session_state.proxy_port, _auto_start_ui_on)
     st.session_state.settings_cache = load_settings()
     st.rerun()
 
@@ -1030,7 +1045,8 @@ with st.expander("🔧 Diagnostics", expanded=False):
         f"**_is_proxy_running():** alive={proxy_alive}, ready={proxy_ready}  \n"
         f"**Plan OK:** {plan_ok} ({plan_model} / {'***' if plan_api else '(empty)'})  \n"
         f"**Act OK:** {act_ok} ({act_model} / {'***' if act_api else '(empty)'})  \n"
-        f"**Auto-start:** {_auto_start_val}"
+        f"**Auto-start:** {_auto_start_val}  \n"
+        f"**Auto-start UI:** {_auto_start_ui_val}"
     )
     # Show health check results if available
     health_results = st.session_state.get("health_results")
