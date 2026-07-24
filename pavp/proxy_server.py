@@ -642,12 +642,17 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 content={"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON"}},
             )
 
-        # Authentication via x-api-key header (Anthropic style).
+        # Authentication: accept x-api-key (Anthropic style) or
+        # Authorization: Bearer (OpenAI/OAuth fallback).
         # This is a local proxy endpoint for Claude Code compatibility.
         # Claude Code sends its own ANTHROPIC_API_KEY in x-api-key, which
         # won't match litellm_master_key. We only require a non-empty key
         # to allow the connection while still rejecting obviously invalid requests.
         api_key = request.headers.get("x-api-key", "")
+        if not api_key:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                api_key = auth_header[7:]
         if not api_key:
             return JSONResponse(
                 status_code=401,
@@ -729,56 +734,79 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         internal_key = s.get("litellm_master_key", "sk-pavp-local")
 
         if is_stream:
+            # Use non-streaming internally, then simulate SSE stream.
+            # Real-time OpenAI→Anthropic stream conversion loses tool_use
+            # blocks (tool_call deltas in OpenAI have no text content).
+            # By buffering the full response we can faithfully emit all
+            # content (text + tool_use) as proper Anthropic SSE events.
             async def _anthropic_stream():
-                """Convert OpenAI SSE stream to Anthropic SSE stream."""
-                first_chunk = True
+                nonlocal openai_body
                 msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+                non_stream_body = dict(openai_body)
+                non_stream_body["stream"] = False
                 try:
                     async with httpx.AsyncClient(timeout=600) as client:
-                        async with client.stream(
-                            "POST", openai_url,
+                        openai_resp = await client.post(
+                            openai_url,
                             headers={"Authorization": f"Bearer {internal_key}"},
-                            json=openai_body,
-                        ) as resp:
-                            async for line in resp.aiter_lines():
-                                line = line.strip()
-                                if not line or not line.startswith("data: "):
-                                    continue
-                                data_str = line[6:]
-                                if data_str == "[DONE]":
-                                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-                                    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': 0}})}\n\n"
-                                    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
-                                    return
-                                try:
-                                    chunk = json.loads(data_str)
-                                except json.JSONDecodeError:
-                                    continue
-                                choices = chunk.get("choices", [])
-                                if not choices:
-                                    continue
-                                delta = choices[0].get("delta", {})
-                                content = delta.get("content", "")
-                                finish_reason = choices[0].get("finish_reason")
-
-                                if first_chunk:
-                                    yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': model, 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n\n"
-                                    yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
-                                    first_chunk = False
-
-                                if content:
-                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': content}})}\n\n"
-
-                                if finish_reason:
-                                    sr_map = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
-                                    anthropic_sr = sr_map.get(finish_reason, "end_turn")
-                                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-                                    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': anthropic_sr, 'stop_sequence': None}, 'usage': {'output_tokens': 0}})}\n\n"
-                                    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
-                                    return
+                            json=non_stream_body,
+                        )
+                        openai_resp.raise_for_status()
+                        data = openai_resp.json()
                 except Exception as e:
-                    print(f"[PAVP] Anthropic stream error: {e}", flush=True)
+                    print(f"[PAVP] Anthropic stream (internal) error: {e}", flush=True)
                     yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n"
+                    return
+
+                # ---- Convert OpenAI response to Anthropic content blocks ----
+                choices = data.get("choices", [{}])
+                choice = choices[0] if choices else {}
+                message = choice.get("message", {})
+                resp_content = message.get("content", "")
+                tool_calls = message.get("tool_calls", [])
+                finish_reason = choice.get("finish_reason", "stop")
+
+                anthropic_blocks: list[dict] = []
+                if resp_content:
+                    anthropic_blocks.append({"type": "text", "text": resp_content})
+                if tool_calls:
+                    for tc in tool_calls:
+                        func = tc.get("function", {})
+                        try:
+                            args = json.loads(func.get("arguments", "{}"))
+                        except json.JSONDecodeError:
+                            args = {}
+                        anthropic_blocks.append({
+                            "type": "tool_use",
+                            "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:12]}"),
+                            "name": func.get("name", ""),
+                            "input": args,
+                        })
+
+                # ---- Emit Anthropic SSE events ----
+                sr_map = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
+                anthropic_sr = sr_map.get(finish_reason, "end_turn")
+                usage = data.get("usage", {})
+
+                yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': model, 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': usage.get('prompt_tokens', 0), 'output_tokens': 0}}})}\n\n"
+
+                for idx, block in enumerate(anthropic_blocks):
+                    bt = block.get("type")
+                    if bt == "text":
+                        text = block.get("text", "")
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                        if text:
+                            yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'text_delta', 'text': text}})}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx})}\n\n"
+                    elif bt == "tool_use":
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'tool_use', 'id': block.get('id'), 'name': block.get('name'), 'input': {}}})}\n\n"
+                        input_json = json.dumps(block.get("input", {}), ensure_ascii=False)
+                        if input_json and input_json != "{}":
+                            yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'input_json_delta', 'partial_json': input_json}})}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx})}\n\n"
+
+                yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': anthropic_sr, 'stop_sequence': None}, 'usage': {'output_tokens': usage.get('completion_tokens', 0)}})}\n\n"
+                yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
 
             return StreamingResponse(_anthropic_stream(), media_type="text/event-stream")
 
