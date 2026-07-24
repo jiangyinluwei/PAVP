@@ -233,12 +233,12 @@ class Orchestrator:
             )
 
             # ---- 裁决分支 ----
-            if verify.verdict == Verdict.PASS:
+            if verify.verdict == Verdict.PASS and not verify.needs_loop:
                 state.fsm_state = "DONE"
                 self._emit(on_event, "done", {"reason": "pass", "iterations": state.iteration}, state=state)
                 return state
 
-            if verify.verdict == Verdict.SHIP_WITH_FIXES:
+            if verify.verdict == Verdict.SHIP_WITH_FIXES and not verify.needs_loop:
                 state.fsm_state = "DONE"
                 self._emit(
                     on_event,
@@ -248,47 +248,27 @@ class Orchestrator:
                 )
                 return state
 
-            # DO_NOT_SHIP 或 INCOMPLETE -> 需要继续循环
-            if state.iteration >= state.max_iterations:
-                state.fsm_state = "FAILED"
-                self._emit(
-                    on_event,
-                    "failed",
-                    {"reason": f"达到最大迭代次数 {state.max_iterations}"},
-                    state=state,
-                )
-                return state
-
-            # 确定续接计划
-            if verify.verdict == Verdict.DO_NOT_SHIP:
-                next_plan = verify.debug_plan
-                plan_event = "debug_plan_adopted"
-                plan_label = "debug_plan"
-            elif verify.verdict == Verdict.INCOMPLETE:
+            # PASS/SHIP_WITH_FIXES + needs_loop=true: 有漏洞/思考不足，需要补充 Plan 后继续 Loop
+            if verify.verdict in (Verdict.PASS, Verdict.SHIP_WITH_FIXES) and verify.needs_loop:
+                # 视为 INCOMPLETE 处理，使用 new_plan 作为续接计划
+                if verify.new_plan is None:
+                    state.fsm_state = "FAILED"
+                    self._emit(
+                        on_event,
+                        "failed",
+                        {"reason": f"{verify.verdict.value} 但 needs_loop=true 且 Verify 未输出 new_plan"},
+                        state=state,
+                    )
+                    return state
+                # 继续执行下面的循环逻辑，使用 new_plan
                 next_plan = verify.new_plan
-                plan_event = "new_plan_adopted"
+                plan_event = "supplement_plan_adopted"
                 plan_label = "new_plan"
-            else:
-                state.fsm_state = "FAILED"
-                self._emit(
-                    on_event, "failed", {"reason": f"未知裁决: {verify.verdict}"}, state=state,
-                )
-                return state
+                # 跳过下面的 NEEDS_REVIEW/DO_NOT_SHIP/INCOMPLETE 分支，直接进入循环续接
+                _skip_verdict_branching = True
 
-            if next_plan is None:
-                state.fsm_state = "FAILED"
-                self._emit(
-                    on_event,
-                    "failed",
-                    {"reason": f"{verify.verdict.value} 但 Verify 未输出 {plan_label}"},
-                    state=state,
-                )
-                return state
-
-            # 自动模式：直接继续；手动模式：等待用户决策
-            if loop_mode == "auto":
-                decision = "continue"
-            else:
+            elif verify.verdict == Verdict.NEEDS_REVIEW:
+                # 模棱两可 -> 始终交由人工决策
                 state.fsm_state = "AWAITING_USER"
                 self._emit(
                     on_event,
@@ -297,19 +277,100 @@ class Orchestrator:
                     state=state,
                 )
                 if decide is None:
+                    # 默认 continue（与现有行为一致）
                     decision = "continue"
                 else:
                     decision = decide(verify, state)
 
-            if decision != "continue":
-                state.fsm_state = "DONE"
-                self._emit(
-                    on_event,
-                    "done",
-                    {"reason": "user_ignore", "iterations": state.iteration},
-                    state=state,
+                if decision != "continue":
+                    state.fsm_state = "DONE"
+                    self._emit(
+                        on_event,
+                        "done",
+                        {"reason": "user_ignore", "iterations": state.iteration},
+                        state=state,
+                    )
+                    return state
+
+                # 用户选择继续 Loop -> 复用当前 Plan（重新执行 Act，携带 Verify issues 作为上下文）
+                next_plan = state.current_plan
+                # 将 verify issues 附加到 plan 的 reasoning 中，供 Act 阶段参考
+                issues_summary = "\n".join(
+                    f"- [{i.severity}] {i.file}: {i.failure_scenario}" for i in verify.issues
                 )
-                return state
+                next_plan.reasoning = (next_plan.reasoning or "") + (
+                    f"\n\n【上一轮 Verify 指出的问题（需修复）】\n{issues_summary}"
+                )
+                plan_event = "needs_review_continue"
+                plan_label = "same_plan"
+                _skip_verdict_branching = True
+
+            else:
+                _skip_verdict_branching = False
+
+            # DO_NOT_SHIP 或 INCOMPLETE -> 需要继续循环
+            if not _skip_verdict_branching:
+                if state.iteration >= state.max_iterations:
+                    state.fsm_state = "FAILED"
+                    self._emit(
+                        on_event,
+                        "failed",
+                        {"reason": f"达到最大迭代次数 {state.max_iterations}"},
+                        state=state,
+                    )
+                    return state
+
+                # 确定续接计划
+                if verify.verdict == Verdict.DO_NOT_SHIP:
+                    next_plan = verify.debug_plan
+                    plan_event = "debug_plan_adopted"
+                    plan_label = "debug_plan"
+                elif verify.verdict == Verdict.INCOMPLETE:
+                    next_plan = verify.new_plan
+                    plan_event = "new_plan_adopted"
+                    plan_label = "new_plan"
+                else:
+                    state.fsm_state = "FAILED"
+                    self._emit(
+                        on_event, "failed", {"reason": f"未知裁决: {verify.verdict}"}, state=state,
+                    )
+                    return state
+
+                if next_plan is None:
+                    state.fsm_state = "FAILED"
+                    self._emit(
+                        on_event,
+                        "failed",
+                        {"reason": f"{verify.verdict.value} 但 Verify 未输出 {plan_label}"},
+                        state=state,
+                    )
+                    return state
+
+                # 自动模式：直接继续；手动模式：等待用户决策
+                if loop_mode == "auto":
+                    decision = "continue"
+                else:
+                    state.fsm_state = "AWAITING_USER"
+                    self._emit(
+                        on_event,
+                        "awaiting_user",
+                        {"iteration": state.iteration, "verify": verify.model_dump(mode="json")},
+                        state=state,
+                    )
+                    if decide is None:
+                        decision = "continue"
+                    else:
+                        decision = decide(verify, state)
+
+                if decision != "continue":
+                    state.fsm_state = "DONE"
+                    self._emit(
+                        on_event,
+                        "done",
+                        {"reason": "user_ignore", "iterations": state.iteration},
+                        state=state,
+                    )
+                    return state
 
             # 采用续接计划，继续循环
             next_plan.plan_id = uuid.uuid4().hex[:8]
@@ -410,8 +471,12 @@ class Orchestrator:
         data = _parse_json(raw)
         # 规范化 verdict
         v = str(data.get("verdict", "")).upper().replace("_", "-").replace(" ", "-")
-        if v not in ("PASS", "SHIP-WITH-FIXES", "DO-NOT-SHIP", "INCOMPLETE"):
+        if v not in ("PASS", "SHIP-WITH-FIXES", "DO-NOT-SHIP", "INCOMPLETE", "NEEDS-REVIEW"):
             v = "DO-NOT-SHIP"
+        # needs_loop 解析（宽松 Loop 条件）
+        needs_loop = data.get("needs_loop", False)
+        if not isinstance(needs_loop, bool):
+            needs_loop = False
         # debug_plan 解析
         debug_plan = None
         dp_data = data.get("debug_plan")
@@ -446,6 +511,7 @@ class Orchestrator:
             ],
             debug_plan=debug_plan,
             new_plan=new_plan,
+            needs_loop=needs_loop,
         )
 
     # -----------------------------------------------------------------
