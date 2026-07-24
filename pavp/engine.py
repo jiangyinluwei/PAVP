@@ -381,7 +381,7 @@ def _call_anthropic_raw(
     if system:
         payload["system"] = system
     if extra:
-        for k in ("metadata", "stop_sequences", "top_p", "top_k"):
+        for k in ("metadata", "stop_sequences", "top_p", "top_k", "thinking", "output_config"):
             if k in extra:
                 payload[k] = extra[k]
         if "tools" in extra:
@@ -432,7 +432,7 @@ def _call_anthropic_stream(
     if system:
         payload["system"] = system
     if extra:
-        for k in ("metadata", "stop_sequences", "top_p", "top_k"):
+        for k in ("metadata", "stop_sequences", "top_p", "top_k", "thinking", "output_config"):
             if k in extra:
                 payload[k] = extra[k]
         if "tools" in extra:
