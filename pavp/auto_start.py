@@ -125,7 +125,7 @@ def _log(msg: str):
 def _read_proxy_port() -> int:
     """Read the actual port the proxy chose (from settings.json)."""
     try:
-        data = json.loads(SETTINGS.read_text(encoding="utf-8"))
+        data = json.loads(SETTINGS.read_text(encoding="utf-8-sig"))
         return data.get("proxy_port", 4000)
     except Exception:
         return 4000

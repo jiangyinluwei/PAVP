@@ -60,7 +60,7 @@ def _write_state_file(state: SessionState) -> None:
         data["task_key_count"] = 1
         data["task_key_sample"] = state.current_plan.plan_id
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8-sig")
 
 
 def _start_verify_state_updater(state: SessionState, interval: float = 15.0) -> threading.Event:
@@ -395,7 +395,7 @@ class Orchestrator:
         _plan_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
-                s["plan_model"], s["plan_api"], s["plan_base_url"],
+                s["plan_model"], s["plan_openai_api"], s["plan_openai_base_url"],
                 [
                     {"role": "system", "content": PLAN_SYSTEM},
                     {"role": "user", "content": build_plan_user_prompt(state.original_requirement, self.project_root)},
@@ -430,7 +430,7 @@ class Orchestrator:
         _answer_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
-                s["plan_model"], s["plan_api"], s["plan_base_url"],
+                s["plan_model"], s["plan_openai_api"], s["plan_openai_base_url"],
                 [
                     {"role": "system", "content": _ANSWER_SYSTEM},
                     {"role": "user", "content": state.original_requirement},
@@ -452,7 +452,7 @@ class Orchestrator:
         _verify_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
-                s["plan_model"], s["plan_api"], s["plan_base_url"],
+                s["plan_model"], s["plan_openai_api"], s["plan_openai_base_url"],
                 [
                     {"role": "system", "content": VERIFY_SYSTEM},
                     {"role": "user", "content": build_verify_user_prompt(

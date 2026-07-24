@@ -640,7 +640,7 @@ def _read_orchestrator_state() -> dict | None:
         except (ValueError, OSError):
             return None
 
-        data = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(_STATE_FILE.read_text(encoding="utf-8-sig"))
         # Use last_api_call if available, otherwise fall back to updated_at
         ts = data.get("last_api_call") or data.get("updated_at", "")
         if not ts:
@@ -828,11 +828,11 @@ if st.sidebar.button("🔄 Refresh", use_container_width=True):
 s = st.session_state.settings_cache
 
 plan_model = s.get("plan_model", "")
-plan_api = s.get("plan_api", "")
-plan_url = s.get("plan_base_url", "")
+plan_api = s.get("plan_openai_api", "")
+plan_url = s.get("plan_openai_base_url", "")
 act_model = s.get("act_model", "")
-act_api = s.get("act_api", "")
-act_url = s.get("act_base_url", "")
+act_api = s.get("act_openai_api", "")
+act_url = s.get("act_openai_base_url", "")
 
 plan_ok = bool(plan_model and plan_api and plan_url)
 act_ok = bool(act_model and act_api and act_url)

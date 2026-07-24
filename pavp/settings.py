@@ -6,22 +6,29 @@
 
 Schema:
 {
-  "litellm_master_key": "sk-pavp-local",   # 编排器调用代理时用的 key
-  "proxy_port": 4001,                       # 代理监听端口
-  "plan_api":       "sk-xxx",              # Plan/Verify 模型 API 密钥
-  "plan_base_url":  "https://.../v1",      # Plan/Verify 模型 API 地址
+  "litellm_master_key": "sk-pavp-local",          # 编排器调用代理时用的 key
+  "proxy_port": 4001,                              # 代理监听端口
   "plan_model":     "deepseek/deepseek-reasoner",  # Plan/Verify 模型标识
-  "act_api":        "sk-xxx",              # Act 执行模型 API 密钥
-  "act_base_url":   "https://.../v1",      # Act 执行模型 API 地址
+  "plan_openai_api":       "sk-xxx",               # Plan/Verify OpenAI API 密钥
+  "plan_openai_base_url":  "https://.../v1",       # Plan/Verify OpenAI API 地址
+  "plan_anthropic_api":       "sk-xxx",            # Plan/Verify Anthropic API 密钥
+  "plan_anthropic_base_url":  "https://...",       # Plan/Verify Anthropic API 地址
   "act_model":      "openai/qwen2.5-coder-32b-instruct",  # Act 模型标识
-  "cc_bin": "claude",                       # Claude Code 可执行文件
-  "act_max_budget": 3.0,                    # 单次 Act 预算上限(美元)
-  "act_max_turns": 40,                      # 单次 Act 轮数上限
-  "act_timeout": 600,                       # 单次 Act 超时秒数
-  "loop_mode": "auto"                       # Loop 循环模式: auto(自动) / manual(手动)
+  "act_openai_api":       "sk-xxx",                # Act OpenAI API 密钥
+  "act_openai_base_url":  "https://.../v1",        # Act OpenAI API 地址
+  "act_anthropic_api":       "sk-xxx",             # Act Anthropic API 密钥
+  "act_anthropic_base_url":  "https://...",        # Act Anthropic API 地址
+  "cc_bin": "claude",                              # Claude Code 可执行文件
+  "act_max_budget": 3.0,                           # 单次 Act 预算上限(美元)
+  "act_max_turns": 40,                             # 单次 Act 轮数上限
+  "act_timeout": 600,                              # 单次 Act 超时秒数
+  "loop_mode": "auto"                              # Loop 循环模式: auto(自动) / manual(手动)
 }
 
 模型标识格式: provider/model，如 deepseek/deepseek-reasoner、openai/gpt-4o-mini。
+
+向后兼容: 旧的 plan_api / plan_base_url / act_api / act_base_url 字段在加载时自动迁移为
+对应的 plan_openai_api / plan_openai_base_url / act_openai_api / act_openai_base_url。
 """
 from __future__ import annotations
 
@@ -34,12 +41,16 @@ DEFAULT_PORT = 5401
 DEFAULTS: dict[str, Any] = {
     "litellm_master_key": "sk-pavp-local",
     "proxy_port": DEFAULT_PORT,
-    "plan_api": "",
-    "plan_base_url": "",
     "plan_model": "",
-    "act_api": "",
-    "act_base_url": "",
+    "plan_openai_api": "",
+    "plan_openai_base_url": "",
+    "plan_anthropic_api": "",
+    "plan_anthropic_base_url": "",
     "act_model": "",
+    "act_openai_api": "",
+    "act_openai_base_url": "",
+    "act_anthropic_api": "",
+    "act_anthropic_base_url": "",
     "cc_bin": "claude",
     "act_max_budget": 3.0,
     "act_max_turns": 40,
@@ -50,6 +61,14 @@ DEFAULTS: dict[str, Any] = {
 }
 
 TEMPLATE: dict[str, Any] = dict(DEFAULTS)
+
+# Old → new field migration map for backward compatibility
+_FIELD_MIGRATION: dict[str, str] = {
+    "plan_api": "plan_openai_api",
+    "plan_base_url": "plan_openai_base_url",
+    "act_api": "act_openai_api",
+    "act_base_url": "act_openai_base_url",
+}
 
 
 def settings_path() -> Path:
@@ -62,16 +81,33 @@ class SettingsError(RuntimeError):
 
 
 def load() -> dict[str, Any]:
-    """读取并合并默认值后的设置。文件不存在则抛 SettingsError。"""
+    """读取并合并默认值后的设置。文件不存在则抛 SettingsError。
+
+    自动迁移旧的 plan_api/plan_base_url/act_api/act_base_url 字段
+    到新的 plan_openai_*/act_openai_* 字段，并写回文件。
+    """
     p = settings_path()
     if not p.exists():
         raise SettingsError(
             f"未找到设置文件 {p}。请手动创建该文件并填入密钥。"
         )
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as e:
         raise SettingsError(f"设置文件 {p} 不是合法 JSON: {e}") from e
+
+    # Backward compatibility: migrate old field names to new ones
+    migrated = False
+    for old_key, new_key in _FIELD_MIGRATION.items():
+        if old_key in data and new_key not in data:
+            data[new_key] = data.pop(old_key)
+            migrated = True
+    if migrated:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8-sig",
+        )
 
     return {**DEFAULTS, **data}
 
@@ -93,14 +129,14 @@ def save_field(key: str, value: Any) -> None:
     """更新 settings.json 中的单个字段（保留其他字段不变）。"""
     p = settings_path()
     if p.exists():
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8-sig"))
     else:
         data = dict(TEMPLATE)
     data[key] = value
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+        encoding="utf-8-sig",
     )
 
 

@@ -130,16 +130,11 @@ def _call_llm_raw(
     timeout: float = 300.0,
     extra: Optional[dict[str, Any]] = None,
 ) -> dict:
-    """Call LLM and return full response dict (may include tool_calls).
+    """Call an OpenAI-compatible LLM API and return full response dict.
 
     extra: additional payload fields (tools, tool_choice, top_p, etc.)
            merged into the request body after model/messages/temperature/max_tokens.
     """
-    if _is_anthropic(base_url):
-        return _call_anthropic_raw(model, api_key, base_url, messages,
-                                   temperature=temperature, max_tokens=max_tokens,
-                                   timeout=timeout, extra=extra)
-
     url = f"{base_url.rstrip('/')}/chat/completions"
     payload: dict[str, Any] = {
         "model": model,
@@ -168,20 +163,15 @@ def _call_llm_stream(
     max_retries: int = 5,
     base_delay: float = 2.0,
 ):
-    """Call LLM with streaming enabled. Yields raw SSE lines (bytes) as they arrive.
+    """Call an OpenAI-compatible LLM API with streaming enabled.
+
+    Yields raw SSE lines (bytes) as they arrive.
 
     Retries on connection failure (common during boot before network is up).
 
     extra: additional payload fields (tools, tool_choice, top_p, etc.)
            merged into the request body.
     """
-    if _is_anthropic(base_url):
-        yield from _call_anthropic_stream(model, api_key, base_url, messages,
-                                          temperature=temperature, max_tokens=max_tokens,
-                                          timeout=timeout, extra=extra,
-                                          max_retries=max_retries, base_delay=base_delay)
-        return
-
     url = f"{base_url.rstrip('/')}/chat/completions"
     payload: dict[str, Any] = {
         "model": model,
@@ -221,12 +211,7 @@ def _call_llm_text(
     *, temperature: float = 0.2, max_tokens: int = 4096,
     timeout: float = 300.0,
 ) -> str:
-    """Call LLM with json_object format"""
-    if _is_anthropic(base_url):
-        return _call_anthropic_text(model, api_key, base_url, messages,
-                                    temperature=temperature, max_tokens=max_tokens,
-                                    timeout=timeout)
-
+    """Call an OpenAI-compatible LLM API with json_object response format."""
     url = f"{base_url.rstrip('/')}/chat/completions"
     payload: dict[str, Any] = {
         "model": model,
@@ -247,13 +232,13 @@ def _call_llm_text(
 
 # =====================================================================
 # Anthropic Native API Support
+#
+# These functions call the Anthropic Messages API directly. They accept
+# OpenAI-format messages (for internal consistency) and convert them to
+# Anthropic format before sending. Responses are converted back to
+# OpenAI-compatible format so the rest of the pipeline sees a uniform
+# interface. Use these explicitly when the backend is an Anthropic API.
 # =====================================================================
-
-
-def _is_anthropic(base_url: str) -> bool:
-    """Detect if the base URL points to an Anthropic API endpoint."""
-    return "anthropic.com" in base_url.lower().rstrip("/")
-
 
 def _anthropic_messages_url(base_url: str) -> str:
     """Build the Anthropic messages endpoint URL from a base URL."""
@@ -657,13 +642,20 @@ def _describe_tools(tools: list[dict]) -> str:
 
 
 def make_plan(prompt: str, project_root: str, settings: Optional[dict] = None,
-              tools: Optional[list[dict]] = None) -> str:
+              tools: Optional[list[dict]] = None,
+              *, base_url: str = "", api_key: str = "") -> str:
     """Run only the Plan phase. Returns plan JSON string.
 
     tools: tool definitions from the agent request, injected as text context
            so the planner knows what capabilities are available.
+    base_url, api_key: optional overrides for the plan model endpoint.
+           When not provided, falls back to plan_openai_* fields in settings.
     """
     s = settings or load_settings()
+    if not base_url:
+        base_url = s["plan_openai_base_url"]
+    if not api_key:
+        api_key = s["plan_openai_api"]
     tools_context = _describe_tools(tools) if tools else ""
     user_content = f"Project: {project_root}\n\nRequirement:\n{prompt}"
     if tools_context:
@@ -672,7 +664,11 @@ def make_plan(prompt: str, project_root: str, settings: Optional[dict] = None,
         {"role": "system", "content": PLAN_SYSTEM},
         {"role": "user", "content": user_content},
     ]
-    return _call_llm_text(s["plan_model"], s["plan_api"], s["plan_base_url"], messages,
+    # Use native Anthropic caller when the backend URL is an Anthropic endpoint
+    if "anthropic.com" in base_url.lower():
+        return _call_anthropic_text(s["plan_model"], api_key, base_url, messages,
+                                    max_tokens=4096)
+    return _call_llm_text(s["plan_model"], api_key, base_url, messages,
                           max_tokens=4096)
 
 

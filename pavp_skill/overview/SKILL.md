@@ -149,14 +149,22 @@ Config file location: `~/.pavp/settings.json`
 Key fields:
 - `litellm_master_key`: Orchestrator auth key for calling proxy (default `sk-pavp-local`)
 - `proxy_port`: PAVP proxy listen port (default 4001)
-- `plan_api` / `plan_base_url` / `plan_model`: Plan/Verify model config (e.g. `deepseek/deepseek-reasoner`)
-- `act_api` / `act_base_url` / `act_model`: Act model config (e.g. `openai/qwen2.5-coder-32b-instruct`)
+- `plan_model`: Plan/Verify model identifier
+- `plan_openai_api` / `plan_openai_base_url`: Plan/Verify model OpenAI-compatible endpoint
+- `plan_anthropic_api` / `plan_anthropic_base_url`: Plan/Verify model Anthropic-native endpoint
+- `act_model`: Act model identifier
+- `act_openai_api` / `act_openai_base_url`: Act model OpenAI-compatible endpoint
+- `act_anthropic_api` / `act_anthropic_base_url`: Act model Anthropic-native endpoint
 - `cc_bin`: Claude Code executable path (default `claude`)
 - `act_max_budget` / `act_max_turns` / `act_timeout`: Act execution limits
 - `loop_mode`: `auto` (automatic loop) / `manual` (manual confirmation)
 - `auto_start`: Enable Windows auto-start (default `True`)
 
 Model identifier format: `provider/model` (e.g. `openai/gpt-4o-mini`, `deepseek/deepseek-reasoner`).
+
+The proxy auto-detects API format from the request endpoint:
+- `/v1/chat/completions` → uses OpenAI URLs (`plan_openai_*` / `act_openai_*`)
+- `/v1/messages` → uses Anthropic URLs (`plan_anthropic_*` / `act_anthropic_*`), falls back to OpenAI URLs if not configured.
 
 ---
 
