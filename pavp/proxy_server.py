@@ -28,6 +28,7 @@ from typing import Optional
 if sys.platform == "win32" and sys.stdout is not None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -620,6 +621,220 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             print(f"[PAVP] Error: {e}\n{traceback.format_exc()}", flush=True)
             _update_proxy_state("IDLE")
             return JSONResponse(status_code=500, content={"error": {"message": str(e)}})
+
+    # =====================================================================
+    # Anthropic Messages API (Claude Code compatible)
+    # =====================================================================
+
+    @app.post("/v1/messages")
+    async def messages_anthropic(request: Request):
+        """Anthropic-compatible Messages API endpoint.
+
+        Converts Anthropic-format requests to OpenAI format,
+        forwards to the internal Plan/Act pipeline,
+        and converts responses back to Anthropic format.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON"}},
+            )
+
+        # Authentication via x-api-key header (Anthropic style)
+        api_key = request.headers.get("x-api-key", "")
+        expected_key = s.get("litellm_master_key", "sk-pavp-local")
+        if not api_key or api_key != expected_key:
+            return JSONResponse(
+                status_code=401,
+                content={"type": "error", "error": {"type": "authentication_error", "message": "Invalid API key"}},
+            )
+
+        model = body.get("model", "pavp")
+        is_stream = body.get("stream", False)
+        anthropic_messages = body.get("messages", [])
+        system = body.get("system", "")
+
+        # ---- Convert Anthropic messages to OpenAI format ----
+        openai_messages: list[dict] = []
+        if system:
+            openai_messages.append({"role": "system", "content": system})
+        for msg in anthropic_messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                text_parts: list[str] = []
+                for block in content:
+                    bt = block.get("type", "")
+                    if bt == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif bt == "tool_use":
+                        text_parts.append(
+                            f"[Tool: {block.get('name', '?')}("
+                            f"{json.dumps(block.get('input', {}), ensure_ascii=False)})]"
+                        )
+                    elif bt == "tool_result":
+                        tc = block.get("content", "")
+                        if isinstance(tc, list):
+                            tc = " ".join(
+                                c.get("text", "") for c in tc
+                                if isinstance(c, dict) and c.get("type") == "text"
+                            )
+                        text_parts.append(str(tc))
+                content = "".join(text_parts)
+            openai_messages.append({"role": role, "content": content})
+
+        # ---- Convert Anthropic tools to OpenAI format ----
+        openai_tools: Optional[list[dict]] = None
+        if "tools" in body:
+            openai_tools = []
+            for tool in body["tools"]:
+                openai_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name", ""),
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("input_schema", {}),
+                    },
+                })
+
+        # ---- Build OpenAI-format request body ----
+        openai_body: dict[str, Any] = {
+            "model": "pavp",
+            "messages": openai_messages,
+            "stream": is_stream,
+            "max_tokens": body.get("max_tokens", 4096),
+        }
+        if openai_tools:
+            openai_body["tools"] = openai_tools
+        if "temperature" in body:
+            openai_body["temperature"] = body["temperature"]
+        if "top_p" in body:
+            openai_body["top_p"] = body["top_p"]
+        if "stop_sequences" in body:
+            openai_body["stop"] = body["stop_sequences"]
+        if "tool_choice" in body:
+            openai_body["tool_choice"] = body["tool_choice"]
+
+        # ---- Forward to internal chat completions endpoint ----
+        port = s.get("proxy_port", DEFAULT_PORT)
+        openai_url = f"http://127.0.0.1:{port}/v1/chat/completions"
+
+        if is_stream:
+            async def _anthropic_stream():
+                """Convert OpenAI SSE stream to Anthropic SSE stream."""
+                first_chunk = True
+                msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+                try:
+                    async with httpx.AsyncClient(timeout=600) as client:
+                        async with client.stream(
+                            "POST", openai_url,
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            json=openai_body,
+                        ) as resp:
+                            async for line in resp.aiter_lines():
+                                line = line.strip()
+                                if not line or not line.startswith("data: "):
+                                    continue
+                                data_str = line[6:]
+                                if data_str == "[DONE]":
+                                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+                                    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': 0}})}\n\n"
+                                    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+                                    return
+                                try:
+                                    chunk = json.loads(data_str)
+                                except json.JSONDecodeError:
+                                    continue
+                                choices = chunk.get("choices", [])
+                                if not choices:
+                                    continue
+                                delta = choices[0].get("delta", {})
+                                content = delta.get("content", "")
+                                finish_reason = choices[0].get("finish_reason")
+
+                                if first_chunk:
+                                    yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': model, 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n\n"
+                                    yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                                    first_chunk = False
+
+                                if content:
+                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': content}})}\n\n"
+
+                                if finish_reason:
+                                    sr_map = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
+                                    anthropic_sr = sr_map.get(finish_reason, "end_turn")
+                                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+                                    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': anthropic_sr, 'stop_sequence': None}, 'usage': {'output_tokens': 0}})}\n\n"
+                                    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+                                    return
+                except Exception as e:
+                    print(f"[PAVP] Anthropic stream error: {e}", flush=True)
+                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n"
+
+            return StreamingResponse(_anthropic_stream(), media_type="text/event-stream")
+
+        # ---- Non-streaming ----
+        try:
+            async with httpx.AsyncClient(timeout=600) as client:
+                openai_resp = await client.post(
+                    openai_url,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json=openai_body,
+                )
+                openai_resp.raise_for_status()
+                data = openai_resp.json()
+        except Exception as e:
+            print(f"[PAVP] Anthropic forward error: {e}", flush=True)
+            return JSONResponse(
+                status_code=502,
+                content={"type": "error", "error": {"type": "api_error", "message": str(e)}},
+            )
+
+        # ---- Convert OpenAI response to Anthropic format ----
+        choices = data.get("choices", [{}])
+        choice = choices[0] if choices else {}
+        message = choice.get("message", {})
+        resp_content = message.get("content", "")
+        tool_calls = message.get("tool_calls", [])
+
+        anthropic_content: list[dict] = []
+        if resp_content:
+            anthropic_content.append({"type": "text", "text": resp_content})
+        if tool_calls:
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                try:
+                    args = json.loads(func.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    args = {}
+                anthropic_content.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:12]}"),
+                    "name": func.get("name", ""),
+                    "input": args,
+                })
+
+        stop_reason = choice.get("finish_reason", "stop")
+        sr_map = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
+        usage = data.get("usage", {})
+
+        return {
+            "id": f"msg_{uuid.uuid4().hex[:12]}",
+            "type": "message",
+            "role": "assistant",
+            "content": anthropic_content,
+            "model": model,
+            "stop_reason": sr_map.get(stop_reason, "end_turn"),
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            },
+            "pavp_stage": data.get("pavp_stage", ""),
+            "task_key": data.get("task_key", ""),
+        }
 
     return app
 
