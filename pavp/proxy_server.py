@@ -642,13 +642,16 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 content={"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON"}},
             )
 
-        # Authentication via x-api-key header (Anthropic style)
+        # Authentication via x-api-key header (Anthropic style).
+        # This is a local proxy endpoint for Claude Code compatibility.
+        # Claude Code sends its own ANTHROPIC_API_KEY in x-api-key, which
+        # won't match litellm_master_key. We only require a non-empty key
+        # to allow the connection while still rejecting obviously invalid requests.
         api_key = request.headers.get("x-api-key", "")
-        expected_key = s.get("litellm_master_key", "sk-pavp-local")
-        if not api_key or api_key != expected_key:
+        if not api_key:
             return JSONResponse(
                 status_code=401,
-                content={"type": "error", "error": {"type": "authentication_error", "message": "Invalid API key"}},
+                content={"type": "error", "error": {"type": "authentication_error", "message": "Missing API key"}},
             )
 
         model = body.get("model", "pavp")
@@ -721,6 +724,10 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         port = s.get("proxy_port", DEFAULT_PORT)
         openai_url = f"http://127.0.0.1:{port}/v1/chat/completions"
 
+        # Use litellm_master_key for internal forwarding (the internal
+        # /v1/chat/completions endpoint authenticates against this key).
+        internal_key = s.get("litellm_master_key", "sk-pavp-local")
+
         if is_stream:
             async def _anthropic_stream():
                 """Convert OpenAI SSE stream to Anthropic SSE stream."""
@@ -730,7 +737,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     async with httpx.AsyncClient(timeout=600) as client:
                         async with client.stream(
                             "POST", openai_url,
-                            headers={"Authorization": f"Bearer {api_key}"},
+                            headers={"Authorization": f"Bearer {internal_key}"},
                             json=openai_body,
                         ) as resp:
                             async for line in resp.aiter_lines():
@@ -780,7 +787,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             async with httpx.AsyncClient(timeout=600) as client:
                 openai_resp = await client.post(
                     openai_url,
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {internal_key}"},
                     json=openai_body,
                 )
                 openai_resp.raise_for_status()
