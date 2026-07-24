@@ -412,7 +412,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 _plan_stop = _start_state_updater("PLANNING", turn_count + 1)
                 try:
                     plan = make_plan(prompt, project_root, s, tools=tools,
-                                     base_url=plan_base_url, api_key=plan_api_key)
+                                     base_url=plan_base_url, api_key=plan_api_key,
+                                     use_anthropic_caller=(api_format == "anthropic"))
                 finally:
                     _plan_stop.set()
                 needs_act = plan_requires_act(plan)

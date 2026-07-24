@@ -643,13 +643,16 @@ def _describe_tools(tools: list[dict]) -> str:
 
 def make_plan(prompt: str, project_root: str, settings: Optional[dict] = None,
               tools: Optional[list[dict]] = None,
-              *, base_url: str = "", api_key: str = "") -> str:
+              *, base_url: str = "", api_key: str = "",
+              use_anthropic_caller: bool = False) -> str:
     """Run only the Plan phase. Returns plan JSON string.
 
     tools: tool definitions from the agent request, injected as text context
            so the planner knows what capabilities are available.
     base_url, api_key: optional overrides for the plan model endpoint.
            When not provided, falls back to plan_openai_* fields in settings.
+    use_anthropic_caller: force Anthropic-native caller (e.g. when the backend
+           is an Anthropic-compatible proxy like DeepSeek /anthropic endpoint).
     """
     s = settings or load_settings()
     if not base_url:
@@ -664,8 +667,10 @@ def make_plan(prompt: str, project_root: str, settings: Optional[dict] = None,
         {"role": "system", "content": PLAN_SYSTEM},
         {"role": "user", "content": user_content},
     ]
-    # Use native Anthropic caller when the backend URL is an Anthropic endpoint
-    if "anthropic.com" in base_url.lower():
+    # Use native Anthropic caller when explicitly flagged or the backend URL
+    # is a genuine Anthropic endpoint.
+    use_anthropic = use_anthropic_caller or "anthropic.com" in base_url.lower()
+    if use_anthropic:
         return _call_anthropic_text(s["plan_model"], api_key, base_url, messages,
                                     max_tokens=4096)
     return _call_llm_text(s["plan_model"], api_key, base_url, messages,
