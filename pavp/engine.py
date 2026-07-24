@@ -63,6 +63,11 @@ Rules:
    It must be unique for each new task. Use random 8-character hex suffix after "TK-".
    The task_key field goes at the top level of the JSON output.
    When the Act model receives this plan, it will use the task_key to maintain context continuity.
+9. [PRE-VALIDATION]: Before starting to plan, you MUST first validate whether the user's input is correct:
+   - Confirm whether the "solution" or "problem" provided by the user is reasonable and correct
+   - If the user's solution or problem is wrong, incomplete, or unreasonable, clearly point out the issue and provide a correction
+   - In this case, set "requires_act": false and describe the correction in the "summary" field
+   - Only proceed with planning and execution after confirming the user's input is correct
 """
 
 def build_pvap_stage(
