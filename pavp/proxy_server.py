@@ -296,6 +296,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     s = settings or load_settings()
     app = FastAPI(title="PAVP Proxy", version="0.5.0")
 
+    # 启动时重置状态文件，避免 UI 读取到残留的旧状态
+    _update_proxy_state("IDLE")
+
     @app.get("/health")
     async def health():
         return {"status": "ok", "service": "pavp-proxy"}

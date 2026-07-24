@@ -625,17 +625,28 @@ _API_CALL_TIMEOUT = 30  # seconds — 匹配 LLM 超时 (30s)，防止思考超�
 
 
 def _read_orchestrator_state() -> dict | None:
-    """Read orchestrator state file. Returns None if last API call is stale (>50s)."""
+    """Read orchestrator state file. Returns None if proxy is not running or last API call is stale."""
     try:
         if not _STATE_FILE.exists():
             return None
+
+        # 检查代理进程是否存活 — 如果代理未运行，状态文件是残留的旧数据
+        if not _PID_FILE.exists():
+            return None
+        try:
+            pid = int(_PID_FILE.read_text().strip())
+            if not _pid_alive(pid):
+                return None
+        except (ValueError, OSError):
+            return None
+
         data = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
         # Use last_api_call if available, otherwise fall back to updated_at
         ts = data.get("last_api_call") or data.get("updated_at", "")
         if not ts:
             return None
         age = time.time() - datetime.fromisoformat(ts).timestamp()
-        if age > _API_CALL_TIMEOUT:  # 50 seconds
+        if age > _API_CALL_TIMEOUT:  # 30 seconds
             return None
         return data
     except Exception:
