@@ -610,27 +610,119 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     return app
 
 
+def _find_free_port(preferred: int, max_tries: int = 100) -> int:
+    """Find a free port, preferring *preferred*.
+
+    Strategy (aggressive about keeping the configured port):
+    1. If *preferred* is free, use it immediately.
+    2. If occupied, check if it's an old PAVP proxy (stale PID file)
+       → kill it, wait, retry.
+    3. If occupied by something else → wait, retry (transient boot process).
+    4. After 5 retries, auto-increment to find the next free port.
+
+    Checks both 127.0.0.1 and 0.0.0.0 to ensure the port is truly free.
+    """
+    import socket as _sock
+    import time as _t
+
+    def _port_free(port: int) -> bool:
+        for host in ("127.0.0.1", "0.0.0.0"):
+            try:
+                s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+                s.bind((host, port))
+                s.close()
+            except OSError:
+                return False
+        return True
+
+    # --- Phase 1: try to claim the preferred port ---
+    for attempt in range(5):
+        if _port_free(preferred):
+            return preferred
+        # If this is an old PAVP proxy with a stale PID file, kill it
+        _flush_old_pavp()
+        _t.sleep(2)
+
+    # --- Phase 2: preferred port is persistently occupied, auto-increment ---
+    for port in range(preferred + 1, preferred + max_tries):
+        if _port_free(port):
+            print(f"[PAVP] Port {preferred} persistently occupied, using port {port}", flush=True)
+            return port
+    raise RuntimeError(
+        f"No free port found in range {preferred}-{preferred + max_tries - 1}"
+    )
+
+
+def _flush_old_pavp() -> None:
+    """Kill any previous PAVP proxy process referenced by the PID file.
+
+    This is called when the preferred port is occupied — if the occupant
+    is our own stale proxy (PID file exists but process is orphaned), we
+    clean it up so the new instance can claim the port.
+    """
+    pid_file = Path.home() / ".pavp" / "proxy.pid"
+    try:
+        if not pid_file.exists():
+            return
+        old_pid = int(pid_file.read_text().strip())
+    except (ValueError, IOError):
+        return
+
+    # Check if the old process is still alive
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    SYNCHRONIZE = 0x00100000
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, old_pid)
+    if handle:
+        kernel32.CloseHandle(handle)
+        # Process exists — don't kill it, it might not be PAVP
+        return
+    # Process does NOT exist: stale PID file, clean up
+    pid_file.unlink(missing_ok=True)
+
+
 def run_server(host="0.0.0.0", port=None):
     s = load_settings()
     if port is None:
         port = s.get("proxy_port", DEFAULT_PORT)
+
+    # Auto-find a free port (prefers the configured port, auto-increments if needed).
+    actual_port = _find_free_port(port)
+    # Always sync settings.json so UI and clients know the actual port.
+    from .settings import save_field
+    save_field("proxy_port", actual_port)
+
+    # Write PID file so the UI can track this process.
+    pid_file = Path.home() / ".pavp" / "proxy.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
+
+    # Write the actual port to a well-known file so the UI can auto-sync
+    # even when the port differs from settings.json.
+    port_file = Path.home() / ".pavp" / "proxy_port.txt"
+    port_file.write_text(str(actual_port))
+
     app = create_app(s)
     settings_file = settings_path()
     print(f"PAVP Proxy starting (pid={os.getpid()})", flush=True)
     print(f"  Settings file: {settings_file}", flush=True)
     print(f"  Home dir:      {Path.home()}", flush=True)
-    print(f"  Listen:        http://{host}:{port}", flush=True)
+    print(f"  Listen:        http://{host}:{actual_port}", flush=True)
     print(f"  Plan:          {s.get('plan_model','?')} @ {s.get('plan_base_url','?')}", flush=True)
     print(f"  Act:           {s.get('act_model','?')} @ {s.get('act_base_url','?')}", flush=True)
     print(f"  Ready:         {bool(s.get('plan_model') and s.get('plan_api') and s.get('act_model') and s.get('act_api'))}", flush=True)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    try:
+        uvicorn.run(app, host=host, port=actual_port, log_level="info")
+    finally:
+        pid_file.unlink(missing_ok=True)
+        port_file.unlink(missing_ok=True)
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=None,
-                   help="Proxy port (default: from settings.json)")
+                   help="Override the port from settings.json (auto-increments if occupied)")
     args = p.parse_args()
     run_server(args.host, args.port)
 

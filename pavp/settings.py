@@ -29,7 +29,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-DEFAULT_PORT = 4001
+DEFAULT_PORT = 5401
 
 DEFAULTS: dict[str, Any] = {
     "litellm_master_key": "sk-pavp-local",

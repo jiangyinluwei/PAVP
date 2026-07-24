@@ -29,7 +29,7 @@ if (-not (Test-Path $settingsPath)) {
     $template = @'
 {
   "litellm_master_key": "sk-pavp-local",
-  "proxy_port": 4001,
+  "proxy_port": 5401,
   "plan_api": "",
   "plan_base_url": "",
   "plan_model": "",

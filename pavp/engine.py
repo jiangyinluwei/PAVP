@@ -8,6 +8,7 @@ Verify: (future) triggered by conversation state
 from __future__ import annotations
 
 import json
+import time as _time_module
 from typing import Any, Optional
 
 import httpx
@@ -96,6 +97,31 @@ def build_pvap_stage(
     return ""
 
 
+def _call_llm_with_retry(api_call, max_retries: int = 5, base_delay: float = 2.0):
+    """Wrap an LLM API call with exponential-backoff retry for transient errors.
+
+    Retries on:
+      - httpx.ConnectError / httpx.TimeoutException (network not ready)
+      - httpx.HTTPStatusError with 5xx status codes
+    Gives up immediately on 4xx errors (bad request / auth).
+    """
+    for attempt in range(max_retries):
+        try:
+            return api_call()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code < 500:
+                raise  # 4xx: don't retry
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            _time_module.sleep(delay)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            _time_module.sleep(delay)
+
+
 def _call_llm_raw(
     model: str, api_key: str, base_url: str,
     messages: list[dict],
@@ -117,8 +143,13 @@ def _call_llm_raw(
     }
     if extra:
         payload.update(extra)
-    r = httpx.post(url, headers={"Authorization": f"Bearer {api_key}"}, json=payload, timeout=timeout)
-    r.raise_for_status()
+
+    def _do_call():
+        r = httpx.post(url, headers={"Authorization": f"Bearer {api_key}"}, json=payload, timeout=timeout)
+        r.raise_for_status()
+        return r
+
+    r = _call_llm_with_retry(_do_call)
     return r.json()
 
 
@@ -128,8 +159,12 @@ def _call_llm_stream(
     *, temperature: float = 0.2, max_tokens: int = 4096,
     timeout: float = 600.0,
     extra: Optional[dict[str, Any]] = None,
+    max_retries: int = 5,
+    base_delay: float = 2.0,
 ):
     """Call LLM with streaming enabled. Yields raw SSE lines (bytes) as they arrive.
+
+    Retries on connection failure (common during boot before network is up).
 
     extra: additional payload fields (tools, tool_choice, top_p, etc.)
            merged into the request body.
@@ -144,12 +179,27 @@ def _call_llm_stream(
     }
     if extra:
         payload.update(extra)
-    with httpx.stream("POST", url, headers={"Authorization": f"Bearer {api_key}"},
-                      json=payload, timeout=timeout) as resp:
-        resp.raise_for_status()
-        for line in resp.iter_lines():
-            if line:
-                yield line
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            with httpx.stream("POST", url,
+                              headers={"Authorization": f"Bearer {api_key}"},
+                              json=payload, timeout=timeout) as resp:
+                resp.raise_for_status()
+                yield from resp.iter_lines()
+            return  # success
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                _time_module.sleep(base_delay * (2 ** attempt))
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code < 500:
+                raise
+            last_error = e
+            if attempt < max_retries - 1:
+                _time_module.sleep(base_delay * (2 ** attempt))
+    raise last_error  # type: ignore[misc]
 
 
 def _call_llm_text(
@@ -159,6 +209,7 @@ def _call_llm_text(
     timeout: float = 300.0,
 ) -> str:
     """Call LLM with json_object format"""
+    url = f"{base_url.rstrip('/')}/chat/completions"
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -166,9 +217,13 @@ def _call_llm_text(
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
-    r = httpx.post(f"{base_url.rstrip('/')}/chat/completions",
-                   headers={"Authorization": f"Bearer {api_key}"}, json=payload, timeout=timeout)
-    r.raise_for_status()
+
+    def _do_call():
+        r = httpx.post(url, headers={"Authorization": f"Bearer {api_key}"}, json=payload, timeout=timeout)
+        r.raise_for_status()
+        return r
+
+    r = _call_llm_with_retry(_do_call)
     return r.json()["choices"][0]["message"]["content"]
 
 
