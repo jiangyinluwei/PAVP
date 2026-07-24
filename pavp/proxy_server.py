@@ -416,12 +416,17 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             # Determine pavp_stage for the API response to the external agent
             # Use _act_started set to distinguish first Act (pvap Act...)
             # from follow-up turns (pvap Continue...).
-            # If the last assistant message had no tool_calls, the workflow is complete.
+            # If the last assistant message had no tool_calls, the workflow is complete
+            # and the next phase is Verify mode (based on task_key continuity).
             if not needs_act:
                 pavp_stage = build_pvap_stage("plan")
             elif compound_key in _act_started:
                 if _is_finish_turn(messages):
-                    pavp_stage = build_pvap_stage("act", is_finish=True)
+                    # Act 阶段完成 -> 进入 Verify 模式（基于 task_key 关联性推断）
+                    # Plan 模型将收到同一 task_key 下 Act 模型的输出，标志当前为 Verify 模式
+                    pavp_stage = build_pvap_stage("verify")
+                    _update_proxy_state("VERIFYING", turn_count + 1)
+                    print(f"[PAVP] Act finished for task_key={task_key}, entering Verify mode", flush=True)
                 else:
                     pavp_stage = build_pvap_stage("act", is_continue=True)
             else:
@@ -564,7 +569,12 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                                     role_sent = True
                             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                     finally:
-                        _update_proxy_state("DONE")
+                        # 如果 Act 阶段完成且进入 Verify 模式，保持 VERIFYING 状态
+                        # 否则标记为 DONE（正常完成）
+                        if "Verify" in pavp_stage:
+                            _update_proxy_state("VERIFYING", turn_count + 1)
+                        else:
+                            _update_proxy_state("DONE")
 
                 return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -577,10 +587,12 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             finally:
                 _act_stop.set()
             msg = resp["choices"][0]["message"]
-            # If the act model responded without tool_calls, the workflow is complete.
+            # If the act model responded without tool_calls, the workflow is complete
+            # and the next phase is Verify mode (based on task_key continuity).
             if not msg.get("tool_calls") and compound_key in _act_started:
-                pavp_stage = build_pvap_stage("act", is_finish=True)
-                print(f"[PAVP] Act finished: no tool_calls, pavp_stage={pavp_stage!r}", flush=True)
+                pavp_stage = build_pvap_stage("verify")
+                _update_proxy_state("VERIFYING", turn_count + 1)
+                print(f"[PAVP] Act finished: no tool_calls, entering Verify mode", flush=True)
             # Inject pavp_stage into assistant message content so agent sees it
             if msg.get("content"):
                 msg["content"] = f"{pavp_stage}\n\n{msg['content']}"
@@ -589,7 +601,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             print(f"[PAVP] Act done: content_len={len(msg.get('content','') or '')}, "
                   f"tool_calls={len(msg.get('tool_calls',[]))}, "
                   f"finish_reason={resp['choices'][0].get('finish_reason','?')}", flush=True)
-            _update_proxy_state("DONE")
+            # 如果已进入 Verify 模式，保持 VERIFYING 状态；否则标记为 DONE
+            if "Verify" not in pavp_stage:
+                _update_proxy_state("DONE")
 
             return {
                 "id": response_id, "object": "chat.completion",

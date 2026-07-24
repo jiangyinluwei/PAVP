@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,8 +55,30 @@ def _write_state_file(state: SessionState) -> None:
         "last_api_call": now,
         "updated_at": now,
     }
+    # 添加 plan_id（作为 task_key）供 UI 展示 &N TK-xxx 前缀
+    if state.current_plan and state.current_plan.plan_id:
+        data["task_key_count"] = 1
+        data["task_key_sample"] = state.current_plan.plan_id
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def _start_verify_state_updater(state: SessionState, interval: float = 15.0) -> threading.Event:
+    """启动后台线程，定期刷新状态文件，防止长时间 LLM 调用导致 UI 超时显示 Standby。
+
+    在阻塞式 LLM 调用（如 _run_verify）期间使用。
+    返回一个 threading.Event，调用方在操作完成后应调用 .set() 停止后台线程。
+    """
+    stop_event = threading.Event()
+
+    def _update_loop():
+        while not stop_event.is_set():
+            _write_state_file(state)
+            stop_event.wait(timeout=interval)
+
+    t = threading.Thread(target=_update_loop, daemon=True)
+    t.start()
+    return stop_event
 
 
 class Orchestrator:
@@ -307,6 +330,8 @@ class Orchestrator:
     def _run_plan(self, state: SessionState) -> Plan:
         s = pavp_settings.load()
         _write_state_file(state)  # 刷新时间戳，防止 UI 超时显示 Standby
+        # 后台线程定期刷新状态文件，防止长时间 LLM 调用导致 UI 超时显示 Standby
+        _plan_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
                 s["plan_model"], s["plan_api"], s["plan_base_url"],
@@ -319,6 +344,8 @@ class Orchestrator:
             )
         except httpx.HTTPError as e:
             raise LLMError(str(e))
+        finally:
+            _plan_stop.set()
         data = _parse_json(raw)
         return Plan(
             plan_id=uuid.uuid4().hex[:8],
@@ -339,6 +366,7 @@ class Orchestrator:
         """
         s = pavp_settings.load()
         _write_state_file(state)  # 刷新时间戳，防止 UI 超时显示 Standby
+        _answer_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
                 s["plan_model"], s["plan_api"], s["plan_base_url"],
@@ -351,12 +379,16 @@ class Orchestrator:
             )
         except httpx.HTTPError as e:
             raise LLMError(str(e))
+        finally:
+            _answer_stop.set()
         data = _parse_json(raw)
         return data.get("answer", "")
 
     def _run_verify(self, state: SessionState) -> VerifyResult:
         s = pavp_settings.load()
         _write_state_file(state)  # 刷新时间戳，防止 UI 超时显示 Standby
+        # 后台线程定期刷新状态文件，防止长时间 LLM 调用导致 UI 超时显示 Standby
+        _verify_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
                 s["plan_model"], s["plan_api"], s["plan_base_url"],
@@ -373,6 +405,8 @@ class Orchestrator:
             )
         except httpx.HTTPError as e:
             raise LLMError(str(e))
+        finally:
+            _verify_stop.set()
         data = _parse_json(raw)
         # 规范化 verdict
         v = str(data.get("verdict", "")).upper().replace("_", "-").replace(" ", "-")
