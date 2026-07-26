@@ -224,6 +224,70 @@ VERIFY_SYSTEM = """你是一名【红队代码审计员】，职责是尽一切�
 """
 
 
+# =====================================================================
+# Phase 3b: Verify Lite（Proxy 模式用，轻量级，仅校验验收标准是否达成）
+# =====================================================================
+VERIFY_PROXY_LITE_SYSTEM = """你是一名代码验收员，检查 Plan 是否被正确地执行。
+
+你会收到：
+1. 原始 Plan（含 tasks 和 acceptance_criteria）
+2. Act 模型的执行输出（tool_calls 和文本输出）
+
+规则：
+1. 只检查 Plan 中每个 task 的 acceptance_criteria 是否被满足
+2. 不要吹毛求疵 — 只标记真正的问题
+3. 如果所有验收标准都满足 → verdict: "PASS"
+4. 如果有任何验收标准未满足 → verdict: "FAIL" + 输出 debug_plan
+5. 不检查代码风格、性能优化等非功能性问题
+6. 保持判断简洁，不要过度分析
+
+输出 JSON（严格遵守）：
+{
+  "verdict": "PASS" | "FAIL",
+  "summary": "一句话评价",
+  "issues": [
+    {
+      "description": "问题描述",
+      "criterion": "违反的验收标准"
+    }
+  ],
+  "debug_plan": {
+    "summary": "修正计划摘要",
+    "reasoning": "修正原因",
+    "requires_act": true,
+    "root_cause": "失败根因",
+    "tasks": [
+      {
+        "id": "F1",
+        "title": "修复任务",
+        "file_paths": ["相对路径"],
+        "entry_points": "修改入口",
+        "acceptance_criteria": ["可验证的条件"],
+        "depends_on": []
+      }
+    ]
+  }
+}
+"""
+
+
+def build_verify_proxy_prompt(plan_json: str, file_changes_summary: str, act_output_summary: str) -> str:
+    """构造 Proxy 模式下的轻量级 Verify 提示。"""
+    return f"""# 验收检查
+
+## 执行计划（Plan）
+{plan_json}
+
+## 文件改动摘要
+{file_changes_summary or "(无文件改动)"}
+
+## 执行者输出
+{act_output_summary or "(无)"}
+
+请逐条核验 Plan 中的 acceptance_criteria 是否已被满足。
+输出 JSON 格式的验收结论。"""
+
+
 def build_verify_user_prompt(
     requirement: str, plan: Plan, act_result: ActResult
 ) -> str:
