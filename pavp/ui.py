@@ -35,6 +35,17 @@ def _html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+def _guess_provider(url: str, model: str = "") -> str:
+    """Guess API provider from URL pattern.
+    
+    OpenAI-compatible APIs use /v1 in the base URL (e.g., http://localhost:5401/v1).
+    Anthropic APIs do not have /v1 (e.g., http://localhost:5401).
+    """
+    if "/v1" in url:
+        return "openai"
+    return "anthropic"
+
+
 # ============================================================================
 # PID file for proxy persistence
 # ============================================================================
@@ -485,16 +496,6 @@ div[data-testid="stStatusWidget"] > div > div::after {
     background: rgba(0,0,0,0.03);
 }
 
-/* URL truncation in sidebar captions */
- .sidebar-url {
-     display: inline-block;
-     max-width: 180px;
-     overflow: hidden;
-     text-overflow: ellipsis;
-     white-space: nowrap;
-     vertical-align: middle;
- }
-
 /* Fixed-width sidebar — fully disable CSS resize property + hide any resize handle */
 section[data-testid="stSidebar"] {
     min-width: 280px !important;
@@ -839,21 +840,11 @@ act_ok = bool(act_model and act_api and act_url)
 
 st.sidebar.divider()
 st.sidebar.markdown("**Plan/Verify**")
-st.sidebar.caption(f"Model: `{plan_model or '—'}`")
-_plan_url_display = _html_escape(plan_url or '—')
-st.sidebar.markdown(
-    f'URL: <code class="sidebar-url">{_plan_url_display}</code>  {"✅" if plan_ok else "⬜"}',
-    unsafe_allow_html=True,
-)
+st.sidebar.caption(f"Model: `{plan_model or '—'}`{' ✅' if plan_ok else ''}")
 
 st.sidebar.divider()
 st.sidebar.markdown("**Act**")
-st.sidebar.caption(f"Model: `{act_model or '-'}`")
-_act_url_display = _html_escape(act_url or '—')
-st.sidebar.markdown(
-    f'URL: <code class="sidebar-url">{_act_url_display}</code>  {"✅" if act_ok else "⬜"}',
-    unsafe_allow_html=True,
-)
+st.sidebar.caption(f"Model: `{act_model or '—'}`{' ✅' if act_ok else ''}")
 
 # --- Loop mode toggle (bottom-left) ---
 st.sidebar.divider()
@@ -983,8 +974,11 @@ if proxy_alive:
     if proxy_ready:
         st.success(f"🟢 Running — Proxy API at `{proxy_url}`")
         api_key = s.get("litellm_master_key", "sk-pavp-local")
+        plan_provider = _guess_provider(plan_url, plan_model)
+        act_provider = _guess_provider(act_url, act_model)
+        proxy_url_no_v1 = proxy_url.rstrip("/v1")
         st.code(
-            f"base_url = \"{proxy_url}\"\n"
+            f"base_url = \"{proxy_url}\"({plan_provider}) / \"{proxy_url_no_v1}\"({act_provider})\n"
             f"api_key  = \"{api_key}\"\n"
             f"model    = \"pavp\"",
             language="python",
