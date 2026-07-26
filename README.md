@@ -25,7 +25,8 @@ PAVP 本质上是一个 **LLM 编排层**，通过本地代理服务实现：
 
 架构说明：
 
-- **Proxy 模式**（推荐）：运行本地代理服务，Agent 直接通过 OpenAI 兼容接口调用，PAVP 在后台透明完成 Plan → Act
+- **Proxy 模式**：运行本地代理服务，Agent 直接通过 OpenAI 兼容接口调用，PAVP 在后台透明完成 Plan → Act
+- **多模型支持**：适配 OpenAI、Anthropic 端口，通过 settings.json 灵活配置 Plan/Act/Verify 使用不同模型
 
 ### 2. 环境要求
 
@@ -56,9 +57,9 @@ model    = "pavp"
 
 ### 5. 作者使用情况
 
-- 当前仅在 **Trae** 中使用，未测试其他 Agent
+- 当前在 **Trae** \ **Claude** 中使用，未测试其他 Agent
 - Plan 额度消费至少降低了 **80%+**（使用廉价模型执行 Act，高能力模型仅用于 Plan/Verify）
-- 偶尔需要返工，需要编写详细的提示词
+- 建议用于复杂任务、长任务，简单任务会过度思考
 - 大体可用，比直接使用普通模型要强
 
 ### 6. 自举
@@ -91,7 +92,8 @@ Each new task generates a unique `task_key` (e.g. `TK-a1b2c3d4`) in the Plan JSO
 
 Architecture notes:
 
-- **Proxy Mode** (recommended): Runs a local proxy server; the agent calls it via an OpenAI-compatible API, and PAVP transparently handles Plan → Act in the background
+- **Proxy Mode**: Runs a local proxy server; the agent calls it via an OpenAI-compatible API, and PAVP transparently handles Plan → Act in the background
+- **Multi-model support**: Compatible with OpenAI and Anthropic endpoints; configure different models for Plan/Act/Verify roles via settings.json
 
 ### 2. Environment
 
@@ -122,9 +124,9 @@ model    = "pavp"
 
 ### 5. Author's Usage
 
-- Currently used **only in Trae**; not tested with other agents
+- Currently used **Trae** \ **Claude**; not tested with other agents
 - Plan token consumption reduced by **80%+** (cheap model for Act, capable model only for Plan/Verify)
-- Occasional rework needed; detailed prompts are required
+- Recommended for complex/long tasks; simple tasks may cause overthinking
 - Generally usable and better than using a raw cheap model directly
 
 ### 6. Bootstrapping
