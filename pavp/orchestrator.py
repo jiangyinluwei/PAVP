@@ -390,12 +390,13 @@ class Orchestrator:
     # -----------------------------------------------------------------
     def _run_plan(self, state: SessionState) -> Plan:
         s = pavp_settings.load()
+        _plan_cfg = pavp_settings.get_plan_config(s)
         _write_state_file(state)  # 刷新时间戳，防止 UI 超时显示 Standby
         # 后台线程定期刷新状态文件，防止长时间 LLM 调用导致 UI 超时显示 Standby
         _plan_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
-                s["plan_model"], s["plan_openai_api"], s["plan_openai_base_url"],
+                _plan_cfg["model"], _plan_cfg["openai_api"], _plan_cfg["openai_base_url"],
                 [
                     {"role": "system", "content": PLAN_SYSTEM},
                     {"role": "user", "content": build_plan_user_prompt(state.original_requirement, self.project_root)},
@@ -426,11 +427,12 @@ class Orchestrator:
         instead of a structured plan.
         """
         s = pavp_settings.load()
+        _plan_cfg = pavp_settings.get_plan_config(s)
         _write_state_file(state)  # 刷新时间戳，防止 UI 超时显示 Standby
         _answer_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
-                s["plan_model"], s["plan_openai_api"], s["plan_openai_base_url"],
+                _plan_cfg["model"], _plan_cfg["openai_api"], _plan_cfg["openai_base_url"],
                 [
                     {"role": "system", "content": _ANSWER_SYSTEM},
                     {"role": "user", "content": state.original_requirement},
@@ -447,12 +449,13 @@ class Orchestrator:
 
     def _run_verify(self, state: SessionState) -> VerifyResult:
         s = pavp_settings.load()
+        _plan_cfg = pavp_settings.get_plan_config(s)
         _write_state_file(state)  # 刷新时间戳，防止 UI 超时显示 Standby
         # 后台线程定期刷新状态文件，防止长时间 LLM 调用导致 UI 超时显示 Standby
         _verify_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
-                s["plan_model"], s["plan_openai_api"], s["plan_openai_base_url"],
+                _plan_cfg["model"], _plan_cfg["openai_api"], _plan_cfg["openai_base_url"],
                 [
                     {"role": "system", "content": VERIFY_SYSTEM},
                     {"role": "user", "content": build_verify_user_prompt(

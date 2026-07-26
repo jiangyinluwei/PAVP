@@ -14,7 +14,7 @@ from typing import Any, Generator, Optional
 
 import httpx
 
-from .settings import load as load_settings
+from .settings import load as load_settings, get_plan_config
 
 PLAN_SYSTEM = """You are a planner. Analyze the requirement, evaluate available tools, and output a structured plan as JSON.
 
@@ -660,10 +660,11 @@ def make_plan(prompt: str, project_root: str, settings: Optional[dict] = None,
            is an Anthropic-compatible proxy like DeepSeek /anthropic endpoint).
     """
     s = settings or load_settings()
+    plan_cfg = get_plan_config(s)
     if not base_url:
-        base_url = s["plan_openai_base_url"]
+        base_url = plan_cfg["openai_base_url"]
     if not api_key:
-        api_key = s["plan_openai_api"]
+        api_key = plan_cfg["openai_api"]
     tools_context = _describe_tools(tools) if tools else ""
     user_content = f"Project: {project_root}\n\nRequirement:\n{prompt}"
     if tools_context:
@@ -676,9 +677,9 @@ def make_plan(prompt: str, project_root: str, settings: Optional[dict] = None,
     # is a genuine Anthropic endpoint.
     use_anthropic = use_anthropic_caller or "anthropic.com" in base_url.lower()
     if use_anthropic:
-        return _call_anthropic_text(s["plan_model"], api_key, base_url, messages,
+        return _call_anthropic_text(plan_cfg["model"], api_key, base_url, messages,
                                     max_tokens=4096)
-    return _call_llm_text(s["plan_model"], api_key, base_url, messages,
+    return _call_llm_text(plan_cfg["model"], api_key, base_url, messages,
                           max_tokens=4096)
 
 

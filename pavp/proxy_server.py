@@ -34,7 +34,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .engine import make_plan, plan_requires_act, _call_llm_raw, _call_llm_stream, _call_llm_text, _call_anthropic_raw, _call_anthropic_stream, build_pvap_stage
-from .settings import load as load_settings, settings_path, DEFAULT_PORT
+from .settings import load as load_settings, settings_path, DEFAULT_PORT, get_plan_config, get_act_config, get_current_plan_id, get_current_act_id
 
 # In-memory plan cache: ckey -> {"plan": plan_json_str, "task_key": str}
 _plan_cache: dict[str, dict] = {}
@@ -309,10 +309,12 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
     @app.get("/info")
     async def info():
-        openai_ready = bool(s.get("plan_model") and s.get("plan_openai_api") and s.get("act_model") and s.get("act_openai_api"))
-        anthropic_ready = bool(s.get("plan_model") and s.get("plan_anthropic_api") and s.get("act_model") and s.get("act_anthropic_api"))
+        plan_cfg = get_plan_config(s)
+        act_cfg = get_act_config(s)
+        openai_ready = bool(plan_cfg["model"] and plan_cfg["openai_api"] and act_cfg["model"] and act_cfg["openai_api"])
+        anthropic_ready = bool(plan_cfg["model"] and plan_cfg["anthropic_api"] and act_cfg["model"] and act_cfg["anthropic_api"])
         return {
-            "plan_model": s.get("plan_model", ""), "act_model": s.get("act_model", ""),
+            "plan_model": plan_cfg["model"], "act_model": act_cfg["model"],
             "ready": openai_ready or anthropic_ready,
             "openai_ready": openai_ready,
             "anthropic_ready": anthropic_ready,
@@ -349,22 +351,25 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         # Detect API format: "openai" (default) or "anthropic" (set by /v1/messages)
         api_format: str = body.get("pavp_api_format", "openai")
 
-        # Resolve Act model config based on API format
+        # Resolve model configs based on current selection
+        plan_cfg = get_plan_config(s)
+        act_cfg = get_act_config(s)
+
         if api_format == "anthropic":
-            act_api_key = s.get("act_anthropic_api") or s.get("act_openai_api", "")
-            act_base_url = s.get("act_anthropic_base_url") or s.get("act_openai_base_url", "")
+            act_api_key = act_cfg["anthropic_api"] or act_cfg["openai_api"]
+            act_base_url = act_cfg["anthropic_base_url"] or act_cfg["openai_base_url"]
             # Use native Anthropic callers for anthropic endpoints
             _call_raw = _call_anthropic_raw
             _call_stream = _call_anthropic_stream
-            plan_base_url = s.get("plan_anthropic_base_url") or s.get("plan_openai_base_url", "")
-            plan_api_key = s.get("plan_anthropic_api") or s.get("plan_openai_api", "")
+            plan_base_url = plan_cfg["anthropic_base_url"] or plan_cfg["openai_base_url"]
+            plan_api_key = plan_cfg["anthropic_api"] or plan_cfg["openai_api"]
         else:
-            act_api_key = s.get("act_openai_api", "")
-            act_base_url = s.get("act_openai_base_url", "")
+            act_api_key = act_cfg["openai_api"]
+            act_base_url = act_cfg["openai_base_url"]
             _call_raw = _call_llm_raw
             _call_stream = _call_llm_stream
-            plan_base_url = s.get("plan_openai_base_url", "")
-            plan_api_key = s.get("plan_openai_api", "")
+            plan_base_url = plan_cfg["openai_base_url"]
+            plan_api_key = plan_cfg["openai_api"]
 
         # Extract tool definitions (for Plan context + Act forwarding)
         tools: Optional[list[dict]] = body.get("tools")
@@ -383,7 +388,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         if tool_choice is not None and "tool_choice" not in extra:
             extra["tool_choice"] = tool_choice
 
-        if not s.get("plan_model"):
+        if not plan_cfg["model"]:
             return JSONResponse(status_code=502, content={"error": {"message": "Plan model not configured"}})
 
         try:
@@ -437,7 +442,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             # Compound key for act_started tracking: task_key + ckey
             compound_key = f"{task_key}:{ckey}" if task_key else ckey
 
-            if needs_act and not s.get("act_model"):
+            if needs_act and not act_cfg["model"]:
                 return JSONResponse(status_code=502, content={"error": {"message": "Act model not configured"}})
 
             response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -467,7 +472,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             if not needs_act:
                 print(f"[PAVP] Plan indicates no Act needed (requires_act=false). Routing to act model for direct answer.", flush=True)
 
-                if not s.get("act_model"):
+                if not act_cfg["model"]:
                     return JSONResponse(status_code=502, content={"error": {"message": "Act model not configured"}})
 
                 # Forward to act model with original messages (no plan injection).
@@ -487,7 +492,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                         role_sent = True
                         try:
                             for line in _call_stream(
-                                s["act_model"], act_api_key, act_base_url,
+                                act_cfg["model"], act_api_key, act_base_url,
                                 messages, max_tokens=8192, timeout=600, extra=extra,
                             ):
                                 # Periodically refresh state to prevent UI timeout
@@ -525,7 +530,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 # Non-streaming
                 _qa_stop = _start_state_updater("ACTING", turn_count + 1)
                 try:
-                    resp = _call_raw(s["act_model"], act_api_key, act_base_url,
+                    resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
                                      messages, max_tokens=8192, timeout=600, extra=extra)
                 finally:
                     _qa_stop.set()
@@ -550,7 +555,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             act_messages = _build_act_messages(messages, plan)
 
             if is_stream:
-                print(f"[PAVP] Act (stream, turn {turn_count}): routing to {s['act_model']}...", flush=True)
+                print(f"[PAVP] Act (stream, turn {turn_count}): routing to {act_cfg['model']}...", flush=True)
 
                 def generate():
                     nonlocal response_id, model_name, pavp_stage
@@ -566,7 +571,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     role_sent = True
                     try:
                         for line in _call_stream(
-                            s["act_model"], act_api_key, act_base_url,
+                            act_cfg["model"], act_api_key, act_base_url,
                             act_messages, max_tokens=8192, timeout=600, extra=extra,
                         ):
                             # Periodically refresh state to prevent UI timeout
@@ -609,10 +614,10 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 return StreamingResponse(generate(), media_type="text/event-stream")
 
             # Non-streaming path
-            print(f"[PAVP] Act (turn {turn_count}): routing to {s['act_model']}...", flush=True)
+            print(f"[PAVP] Act (turn {turn_count}): routing to {act_cfg['model']}...", flush=True)
             _act_stop = _start_state_updater("ACTING", turn_count + 1)
             try:
-                resp = _call_raw(s["act_model"], act_api_key, act_base_url,
+                resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
                                  act_messages, max_tokens=8192, timeout=600, extra=extra)
             finally:
                 _act_stop.set()
@@ -1002,9 +1007,11 @@ def run_server(host="0.0.0.0", port=None):
     print(f"  Settings file: {settings_file}", flush=True)
     print(f"  Home dir:      {Path.home()}", flush=True)
     print(f"  Listen:        http://{host}:{actual_port}", flush=True)
-    print(f"  Plan:          {s.get('plan_model','?')} @ {s.get('plan_openai_base_url','?')}", flush=True)
-    print(f"  Act:           {s.get('act_model','?')} @ {s.get('act_openai_base_url','?')}", flush=True)
-    print(f"  Ready:         {bool(s.get('plan_model') and s.get('plan_openai_api') and s.get('act_model') and s.get('act_openai_api'))}", flush=True)
+    _plan_cfg = get_plan_config(s)
+    _act_cfg = get_act_config(s)
+    print(f"  Plan:          {_plan_cfg['model'] or '?'} @ {_plan_cfg['openai_base_url'] or '?'}", flush=True)
+    print(f"  Act:           {_act_cfg['model'] or '?'} @ {_act_cfg['openai_base_url'] or '?'}", flush=True)
+    print(f"  Ready:         {bool(_plan_cfg['model'] and _plan_cfg['openai_api'] and _act_cfg['model'] and _act_cfg['openai_api'])}", flush=True)
     try:
         uvicorn.run(app, host=host, port=actual_port, log_level="info")
     finally:

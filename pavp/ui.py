@@ -21,10 +21,16 @@ if _PROJECT_ROOT not in sys.path:
 import streamlit as st
 
 try:
-    from .settings import load as load_settings, settings_path, save_field, DEFAULT_PORT
+    from .settings import (load as load_settings, settings_path, save_field, DEFAULT_PORT,
+                           get_plan_config, get_act_config,
+                           get_current_plan_id, get_current_act_id,
+                           get_plan_config_ids, get_act_config_ids)
     from .auto_start import set_auto_start
 except ImportError:
-    from pavp.settings import load as load_settings, settings_path, save_field, DEFAULT_PORT
+    from pavp.settings import (load as load_settings, settings_path, save_field, DEFAULT_PORT,
+                               get_plan_config, get_act_config,
+                               get_current_plan_id, get_current_act_id,
+                               get_plan_config_ids, get_act_config_ids)
     from pavp.auto_start import set_auto_start
 
 import httpx
@@ -53,6 +59,38 @@ _PID_FILE = Path.home() / ".pavp" / "proxy.pid"
 _LOG_FILE = Path(_PROJECT_ROOT) / "log" / "pavp_proxy.log"
 # 手动停止标记文件：用户点击 Stop Proxy 时写入时间戳，防止页面刷新后 auto_start 重新启动
 _MANUAL_STOP_FILE = Path.home() / ".pavp" / "manual_stop.txt"
+# 代理启动时的模型配置快照，用于检测 UI 选择是否与运行中的代理一致
+_PROXY_CONFIG_SNAPSHOT = Path.home() / ".pavp" / "proxy_config_snapshot.json"
+
+
+def _save_config_snapshot():
+    """保存当前选中的模型配置快照。"""
+    s = load_settings()
+    snapshot = {
+        "current_plan_id": get_current_plan_id(s),
+        "current_act_id": get_current_act_id(s),
+        "plan_model": get_plan_config(s)["model"],
+        "act_model": get_act_config(s)["model"],
+    }
+    _PROXY_CONFIG_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+    _PROXY_CONFIG_SNAPSHOT.write_text(
+        json.dumps(snapshot, ensure_ascii=False), encoding="utf-8-sig"
+    )
+
+
+def _config_mismatch() -> bool:
+    """检查当前 UI 选择的模型配置是否与运行中的代理不一致。"""
+    if not _PROXY_CONFIG_SNAPSHOT.exists():
+        return False
+    try:
+        snapshot = json.loads(_PROXY_CONFIG_SNAPSHOT.read_text(encoding="utf-8-sig"))
+        s = load_settings()
+        return (
+            snapshot.get("current_plan_id") != get_current_plan_id(s)
+            or snapshot.get("current_act_id") != get_current_act_id(s)
+        )
+    except Exception:
+        return False
 
 
 def _pid_alive(pid: int) -> bool:
@@ -237,6 +275,9 @@ def _start_proxy(port: int):
         # Clear any previous startup error on successful process launch
         st.session_state.proxy_start_error = None
 
+        # Save config snapshot for Restart Proxy detection
+        _save_config_snapshot()
+
         # Re-read settings to get the actual port (proxy may have auto-incremented)
         try:
             new_settings = load_settings()
@@ -286,6 +327,8 @@ def _stop_proxy():
     # 记录手动停止时间戳，防止页面刷新后 auto_start 重新启动
     _MANUAL_STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
     _MANUAL_STOP_FILE.write_text(str(time.time()))
+    # 清理配置快照
+    _PROXY_CONFIG_SNAPSHOT.unlink(missing_ok=True)
 
     pid = _read_pid()
     result_parts = []
@@ -828,22 +871,56 @@ if st.sidebar.button("🔄 Refresh", use_container_width=True):
 # --- Model config in sidebar ---
 s = st.session_state.settings_cache
 
-plan_model = s.get("plan_model", "")
-plan_api = s.get("plan_openai_api", "")
-plan_url = s.get("plan_openai_base_url", "")
-act_model = s.get("act_model", "")
-act_api = s.get("act_openai_api", "")
-act_url = s.get("act_openai_base_url", "")
-
-plan_ok = bool(plan_model and plan_api and plan_url)
-act_ok = bool(act_model and act_api and act_url)
+# Get available config IDs and current selection
+_plan_ids = get_plan_config_ids(s)
+_act_ids = get_act_config_ids(s)
+_current_plan_id = get_current_plan_id(s)
+_current_act_id = get_current_act_id(s)
 
 st.sidebar.divider()
-st.sidebar.markdown("**Plan/Verify**")
+st.sidebar.markdown("**Plan/Verify Model**")
+
+# Plan config combo box
+_plan_id_options = [f"plan_{i}" for i in _plan_ids]
+_plan_idx = _plan_ids.index(_current_plan_id) if _current_plan_id in _plan_ids else 0
+_selected_plan_label = st.sidebar.selectbox(
+    "Config", options=_plan_id_options, index=_plan_idx, key="plan_config_selector"
+)
+_selected_plan_id = int(_selected_plan_label.split("_")[1])
+if _selected_plan_id != _current_plan_id:
+    save_field("current_plan_id", _selected_plan_id)
+    st.session_state.settings_cache = load_settings()
+    st.rerun()
+
+# Show current plan config details
+_plan_cfg = get_plan_config(s, _selected_plan_id)
+plan_ok = bool(_plan_cfg["model"] and _plan_cfg["openai_api"] and _plan_cfg["openai_base_url"])
+plan_model = _plan_cfg["model"]
+plan_api = _plan_cfg["openai_api"]
+plan_url = _plan_cfg["openai_base_url"]
 st.sidebar.caption(f"Model: `{plan_model or '—'}`{' ✅' if plan_ok else ''}")
 
 st.sidebar.divider()
-st.sidebar.markdown("**Act**")
+st.sidebar.markdown("**Act Model**")
+
+# Act config combo box
+_act_id_options = [f"act_{i}" for i in _act_ids]
+_act_idx = _act_ids.index(_current_act_id) if _current_act_id in _act_ids else 0
+_selected_act_label = st.sidebar.selectbox(
+    "Config", options=_act_id_options, index=_act_idx, key="act_config_selector"
+)
+_selected_act_id = int(_selected_act_label.split("_")[1])
+if _selected_act_id != _current_act_id:
+    save_field("current_act_id", _selected_act_id)
+    st.session_state.settings_cache = load_settings()
+    st.rerun()
+
+# Show current act config details
+_act_cfg = get_act_config(s, _selected_act_id)
+act_ok = bool(_act_cfg["model"] and _act_cfg["openai_api"] and _act_cfg["openai_base_url"])
+act_model = _act_cfg["model"]
+act_api = _act_cfg["openai_api"]
+act_url = _act_cfg["openai_base_url"]
 st.sidebar.caption(f"Model: `{act_model or '—'}`{' ✅' if act_ok else ''}")
 
 # --- Loop mode toggle (bottom-left) ---
@@ -908,14 +985,27 @@ proxy_url = f"http://localhost:{port}/v1"
 _has_error = bool(st.session_state.get("proxy_start_error"))
 
 if proxy_alive:
-    # Running: only show Stop + Health
-    col_stop, col_health = st.columns(2)
-    if col_stop.button("■ Stop Proxy", use_container_width=True):
-        _stop_proxy()
-        st.session_state.proxy_stop_time = time.time()
-        # Wait for proxy to actually stop (up to 5s) instead of fixed sleep
-        _wait_until(lambda: not _is_proxy_running(port)[0], timeout=5.0, interval=0.1)
-        st.rerun()
+    # Running: check if proxy config differs from UI selection
+    _needs_restart = _config_mismatch()
+    if _needs_restart:
+        col_restart, col_health = st.columns(2)
+        if col_restart.button("↻ Restart Proxy", type="primary", use_container_width=True):
+            _stop_proxy()
+            st.session_state.pop("proxy_stop_time", None)
+            # Wait for stop to complete (poll up to 5s), then start with new config
+            _wait_until(lambda: not _is_proxy_running(port)[0], timeout=5.0, interval=0.1)
+            _start_proxy(port)
+            # Wait for proxy to become healthy (up to 10s)
+            _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+            st.rerun()
+    else:
+        col_stop, col_health = st.columns(2)
+        if col_stop.button("■ Stop Proxy", use_container_width=True):
+            _stop_proxy()
+            st.session_state.proxy_stop_time = time.time()
+            # Wait for proxy to actually stop (up to 5s) instead of fixed sleep
+            _wait_until(lambda: not _is_proxy_running(port)[0], timeout=5.0, interval=0.1)
+            st.rerun()
     if col_health.button("🔍 Health", use_container_width=True):
         _run_health_check(port)
         st.rerun()
