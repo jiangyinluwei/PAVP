@@ -656,7 +656,97 @@ section[data-testid="stSidebar"] .stButton {
     66%  { width: 1.2em; }
     100% { width: 1.4em; }
 }
+
+/* Sidebar config selectbox: look like a clickable label, not an input */
+/* Override the global "cursor: text" rule for ALL sidebar inputs */
+section[data-testid="stSidebar"] input,
+section[data-testid="stSidebar"] textarea,
+section[data-testid="stSidebar"] [contenteditable="true"],
+div[data-testid="stSidebar"] input,
+div[data-testid="stSidebar"] textarea,
+div[data-testid="stSidebar"] [contenteditable="true"] {
+    cursor: default !important;
+}
+div[data-testid="stSidebar"] div[data-testid="stSelectbox"] [role="combobox"],
+div[data-testid="stSidebar"] div[data-testid="stSelectbox"] input {
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    outline: none !important;
+    padding: 0 !important;
+    caret-color: transparent !important;
+    cursor: default !important;
+    user-select: none !important;
+    -webkit-user-select: none !important;
+}
+div[data-testid="stSidebar"] div[data-testid="stSelectbox"] > div {
+    border: none !important;
+    background: none !important;
+    box-shadow: none !important;
+    min-height: 22px !important;
+    padding: 0 !important;
+    cursor: default !important;
+}
+div[data-testid="stSidebar"] div[data-testid="stSelectbox"] > div:focus-within {
+    outline: none !important;
+    box-shadow: none !important;
+}
+/* Remove label row gap inside column */
+div[data-testid="stSidebar"] div[data-testid="column"] {
+    gap: 0 !important;
+}
  </style>""", unsafe_allow_html=True)
+
+# --- Make sidebar selectbox combobox inputs read-only ---
+# In Streamlit 1.59+ the selectbox uses a React Aria <input role="combobox">
+# that allows typing to filter. We set readOnly=true so the selected value
+# text cannot be edited from the keyboard, while click-to-open still works.
+try:
+    import streamlit.components.v1 as components
+    components.html("""
+    <script>
+    (function() {
+        function lockSidebarSelectboxes() {
+            const sidebar = parent.document.querySelector('section[data-testid="stSidebar"]');
+            if (!sidebar) return;
+            const inputs = sidebar.querySelectorAll('div[data-testid="stSelectbox"] input[role="combobox"], div[data-testid="stSelectbox"] input');
+            inputs.forEach(function(inp) {
+                if (!inp.dataset.pavpLocked) {
+                    inp.setAttribute('readonly', 'readonly');
+                    inp.readOnly = true;
+                    // Block typing keys but allow click events to bubble for dropdown open
+                    inp.addEventListener('keydown', function(e) {
+                        // Allow Tab for navigation, block all other keys
+                        if (e.key !== 'Tab') {
+                            e.preventDefault();
+                        }
+                    });
+                    inp.dataset.pavpLocked = '1';
+                }
+            });
+        }
+        // Run on load and observe DOM mutations (Streamlit re-renders frequently)
+        lockSidebarSelectboxes();
+        const observer = new MutationObserver(function() { lockSidebarSelectboxes(); });
+        const target = parent.document.querySelector('section[data-testid="stSidebar"]');
+        if (target) {
+            observer.observe(target, { childList: true, subtree: true });
+        } else {
+            // Retry until sidebar exists
+            const retry = setInterval(function() {
+                const t = parent.document.querySelector('section[data-testid="stSidebar"]');
+                if (t) {
+                    clearInterval(retry);
+                    lockSidebarSelectboxes();
+                    observer.observe(t, { childList: true, subtree: true });
+                }
+            }, 500);
+        }
+    })();
+    </script>
+    """, height=0, width=0)
+except Exception:
+    pass
 
 st.title("PAVP Proxy")
 
@@ -880,12 +970,17 @@ _current_act_id = get_current_act_id(s)
 st.sidebar.divider()
 st.sidebar.markdown("**Plan/Verify Model**")
 
-# Plan config combo box
+# Plan config combo box — inline with Config label
 _plan_id_options = [f"plan_{i}" for i in _plan_ids]
 _plan_idx = _plan_ids.index(_current_plan_id) if _current_plan_id in _plan_ids else 0
-_selected_plan_label = st.sidebar.selectbox(
-    "Config", options=_plan_id_options, index=_plan_idx, key="plan_config_selector"
-)
+_plan_cfg_col, _plan_sel_col = st.sidebar.columns([0.22, 0.55], vertical_alignment="center")
+with _plan_cfg_col:
+    st.markdown("**Config**")
+with _plan_sel_col:
+    _selected_plan_label = st.selectbox(
+        "", options=_plan_id_options, index=_plan_idx, key="plan_config_selector",
+        label_visibility="collapsed"
+    )
 _selected_plan_id = int(_selected_plan_label.split("_")[1])
 if _selected_plan_id != _current_plan_id:
     save_field("current_plan_id", _selected_plan_id)
@@ -903,12 +998,17 @@ st.sidebar.caption(f"Model: `{plan_model or '—'}`{' ✅' if plan_ok else ''}")
 st.sidebar.divider()
 st.sidebar.markdown("**Act Model**")
 
-# Act config combo box
+# Act config combo box — inline with Config label
 _act_id_options = [f"act_{i}" for i in _act_ids]
 _act_idx = _act_ids.index(_current_act_id) if _current_act_id in _act_ids else 0
-_selected_act_label = st.sidebar.selectbox(
-    "Config", options=_act_id_options, index=_act_idx, key="act_config_selector"
-)
+_act_cfg_col, _act_sel_col = st.sidebar.columns([0.22, 0.55], vertical_alignment="center")
+with _act_cfg_col:
+    st.markdown("**Config**")
+with _act_sel_col:
+    _selected_act_label = st.selectbox(
+        "", options=_act_id_options, index=_act_idx, key="act_config_selector",
+        label_visibility="collapsed"
+    )
 _selected_act_id = int(_selected_act_label.split("_")[1])
 if _selected_act_id != _current_act_id:
     save_field("current_act_id", _selected_act_id)
