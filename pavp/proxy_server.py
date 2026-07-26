@@ -28,12 +28,13 @@ from typing import Optional
 if sys.platform == "win32" and sys.stdout is not None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .engine import make_plan, plan_requires_act, _call_llm_raw, _call_llm_stream, _call_llm_text, build_pvap_stage
-from .settings import load as load_settings, settings_path, DEFAULT_PORT
+from .engine import make_plan, plan_requires_act, _call_llm_raw, _call_llm_stream, _call_llm_text, _call_anthropic_raw, _call_anthropic_stream, build_pvap_stage
+from .settings import load as load_settings, settings_path, DEFAULT_PORT, get_plan_config, get_act_config, get_current_plan_id, get_current_act_id
 
 # In-memory plan cache: ckey -> {"plan": plan_json_str, "task_key": str}
 _plan_cache: dict[str, dict] = {}
@@ -74,7 +75,7 @@ def _update_proxy_state(fsm_state: str, iteration: int = 0, *, last_api_call: st
         data["task_key_count"] = len(_task_cache)
         data["task_key_sample"] = random.choice(list(_task_cache.keys()))
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8-sig")
 
 
 def _start_state_updater(fsm_state: str, iteration: int, interval: float = 15.0) -> threading.Event:
@@ -295,6 +296,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     s = settings or load_settings()
     app = FastAPI(title="PAVP Proxy", version="0.5.0")
 
+    # 启动时重置状态文件，避免 UI 读取到残留的旧状态
+    _update_proxy_state("IDLE")
+
     @app.get("/health")
     async def health():
         return {"status": "ok", "service": "pavp-proxy"}
@@ -305,9 +309,15 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
     @app.get("/info")
     async def info():
+        plan_cfg = get_plan_config(s)
+        act_cfg = get_act_config(s)
+        openai_ready = bool(plan_cfg["model"] and plan_cfg["openai_api"] and act_cfg["model"] and act_cfg["openai_api"])
+        anthropic_ready = bool(plan_cfg["model"] and plan_cfg["anthropic_api"] and act_cfg["model"] and act_cfg["anthropic_api"])
         return {
-            "plan_model": s.get("plan_model", ""), "act_model": s.get("act_model", ""),
-            "ready": bool(s.get("plan_model") and s.get("plan_api") and s.get("act_model") and s.get("act_api")),
+            "plan_model": plan_cfg["model"], "act_model": act_cfg["model"],
+            "ready": openai_ready or anthropic_ready,
+            "openai_ready": openai_ready,
+            "anthropic_ready": anthropic_ready,
         }
 
     @app.post("/v1/chat/completions")
@@ -338,6 +348,29 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         ckey = _cache_key(messages)
         turn_count = _count_turns(messages)
 
+        # Detect API format: "openai" (default) or "anthropic" (set by /v1/messages)
+        api_format: str = body.get("pavp_api_format", "openai")
+
+        # Resolve model configs based on current selection
+        plan_cfg = get_plan_config(s)
+        act_cfg = get_act_config(s)
+
+        if api_format == "anthropic":
+            act_api_key = act_cfg["anthropic_api"] or act_cfg["openai_api"]
+            act_base_url = act_cfg["anthropic_base_url"] or act_cfg["openai_base_url"]
+            # Use native Anthropic callers for anthropic endpoints
+            _call_raw = _call_anthropic_raw
+            _call_stream = _call_anthropic_stream
+            plan_base_url = plan_cfg["anthropic_base_url"] or plan_cfg["openai_base_url"]
+            plan_api_key = plan_cfg["anthropic_api"] or plan_cfg["openai_api"]
+        else:
+            act_api_key = act_cfg["openai_api"]
+            act_base_url = act_cfg["openai_base_url"]
+            _call_raw = _call_llm_raw
+            _call_stream = _call_llm_stream
+            plan_base_url = plan_cfg["openai_base_url"]
+            plan_api_key = plan_cfg["openai_api"]
+
         # Extract tool definitions (for Plan context + Act forwarding)
         tools: Optional[list[dict]] = body.get("tools")
         tool_choice: Any = body.get("tool_choice")
@@ -345,7 +378,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         # Build extra: all original request fields forwarded to Act model.
         # Exclude fields we handle specially: model (set from settings),
         # messages (rewritten with plan injection), stream (consumed here).
-        _extra_skip = {"model", "messages", "stream"}
+        _extra_skip = {"model", "messages", "stream", "pavp_api_format"}
         extra: dict[str, Any] = {
             k: v for k, v in body.items() if k not in _extra_skip
         }
@@ -355,7 +388,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
         if tool_choice is not None and "tool_choice" not in extra:
             extra["tool_choice"] = tool_choice
 
-        if not s.get("plan_model"):
+        if not plan_cfg["model"]:
             return JSONResponse(status_code=502, content={"error": {"message": "Plan model not configured"}})
 
         try:
@@ -383,7 +416,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 _update_proxy_state("PLANNING", turn_count + 1)
                 _plan_stop = _start_state_updater("PLANNING", turn_count + 1)
                 try:
-                    plan = make_plan(prompt, project_root, s, tools=tools)
+                    plan = make_plan(prompt, project_root, s, tools=tools,
+                                     base_url=plan_base_url, api_key=plan_api_key,
+                                     use_anthropic_caller=(api_format == "anthropic"))
                 finally:
                     _plan_stop.set()
                 needs_act = plan_requires_act(plan)
@@ -407,7 +442,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             # Compound key for act_started tracking: task_key + ckey
             compound_key = f"{task_key}:{ckey}" if task_key else ckey
 
-            if needs_act and not s.get("act_model"):
+            if needs_act and not act_cfg["model"]:
                 return JSONResponse(status_code=502, content={"error": {"message": "Act model not configured"}})
 
             response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -416,12 +451,17 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             # Determine pavp_stage for the API response to the external agent
             # Use _act_started set to distinguish first Act (pvap Act...)
             # from follow-up turns (pvap Continue...).
-            # If the last assistant message had no tool_calls, the workflow is complete.
+            # If the last assistant message had no tool_calls, the workflow is complete
+            # and the next phase is Verify mode (based on task_key continuity).
             if not needs_act:
                 pavp_stage = build_pvap_stage("plan")
             elif compound_key in _act_started:
                 if _is_finish_turn(messages):
-                    pavp_stage = build_pvap_stage("act", is_finish=True)
+                    # Act 阶段完成 -> 进入 Verify 模式（基于 task_key 关联性推断）
+                    # Plan 模型将收到同一 task_key 下 Act 模型的输出，标志当前为 Verify 模式
+                    pavp_stage = build_pvap_stage("verify")
+                    _update_proxy_state("VERIFYING", turn_count + 1)
+                    print(f"[PAVP] Act finished for task_key={task_key}, entering Verify mode", flush=True)
                 else:
                     pavp_stage = build_pvap_stage("act", is_continue=True)
             else:
@@ -432,7 +472,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             if not needs_act:
                 print(f"[PAVP] Plan indicates no Act needed (requires_act=false). Routing to act model for direct answer.", flush=True)
 
-                if not s.get("act_model"):
+                if not act_cfg["model"]:
                     return JSONResponse(status_code=502, content={"error": {"message": "Act model not configured"}})
 
                 # Forward to act model with original messages (no plan injection).
@@ -451,8 +491,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                         yield f"data: {json.dumps(initial, ensure_ascii=False)}\n\n"
                         role_sent = True
                         try:
-                            for line in _call_llm_stream(
-                                s["act_model"], s["act_api"], s["act_base_url"],
+                            for line in _call_stream(
+                                act_cfg["model"], act_api_key, act_base_url,
                                 messages, max_tokens=8192, timeout=600, extra=extra,
                             ):
                                 # Periodically refresh state to prevent UI timeout
@@ -490,8 +530,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 # Non-streaming
                 _qa_stop = _start_state_updater("ACTING", turn_count + 1)
                 try:
-                    resp = _call_llm_raw(s["act_model"], s["act_api"], s["act_base_url"],
-                                         messages, max_tokens=8192, timeout=600, extra=extra)
+                    resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
+                                     messages, max_tokens=8192, timeout=600, extra=extra)
                 finally:
                     _qa_stop.set()
                 msg = resp["choices"][0]["message"]
@@ -515,7 +555,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             act_messages = _build_act_messages(messages, plan)
 
             if is_stream:
-                print(f"[PAVP] Act (stream, turn {turn_count}): routing to {s['act_model']}...", flush=True)
+                print(f"[PAVP] Act (stream, turn {turn_count}): routing to {act_cfg['model']}...", flush=True)
 
                 def generate():
                     nonlocal response_id, model_name, pavp_stage
@@ -530,8 +570,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     yield f"data: {json.dumps(initial, ensure_ascii=False)}\n\n"
                     role_sent = True
                     try:
-                        for line in _call_llm_stream(
-                            s["act_model"], s["act_api"], s["act_base_url"],
+                        for line in _call_stream(
+                            act_cfg["model"], act_api_key, act_base_url,
                             act_messages, max_tokens=8192, timeout=600, extra=extra,
                         ):
                             # Periodically refresh state to prevent UI timeout
@@ -564,23 +604,30 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                                     role_sent = True
                             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                     finally:
-                        _update_proxy_state("DONE")
+                        # 如果 Act 阶段完成且进入 Verify 模式，保持 VERIFYING 状态
+                        # 否则标记为 DONE（正常完成）
+                        if "Verify" in pavp_stage:
+                            _update_proxy_state("VERIFYING", turn_count + 1)
+                        else:
+                            _update_proxy_state("DONE")
 
                 return StreamingResponse(generate(), media_type="text/event-stream")
 
             # Non-streaming path
-            print(f"[PAVP] Act (turn {turn_count}): routing to {s['act_model']}...", flush=True)
+            print(f"[PAVP] Act (turn {turn_count}): routing to {act_cfg['model']}...", flush=True)
             _act_stop = _start_state_updater("ACTING", turn_count + 1)
             try:
-                resp = _call_llm_raw(s["act_model"], s["act_api"], s["act_base_url"],
-                                     act_messages, max_tokens=8192, timeout=600, extra=extra)
+                resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
+                                 act_messages, max_tokens=8192, timeout=600, extra=extra)
             finally:
                 _act_stop.set()
             msg = resp["choices"][0]["message"]
-            # If the act model responded without tool_calls, the workflow is complete.
+            # If the act model responded without tool_calls, the workflow is complete
+            # and the next phase is Verify mode (based on task_key continuity).
             if not msg.get("tool_calls") and compound_key in _act_started:
-                pavp_stage = build_pvap_stage("act", is_finish=True)
-                print(f"[PAVP] Act finished: no tool_calls, pavp_stage={pavp_stage!r}", flush=True)
+                pavp_stage = build_pvap_stage("verify")
+                _update_proxy_state("VERIFYING", turn_count + 1)
+                print(f"[PAVP] Act finished: no tool_calls, entering Verify mode", flush=True)
             # Inject pavp_stage into assistant message content so agent sees it
             if msg.get("content"):
                 msg["content"] = f"{pavp_stage}\n\n{msg['content']}"
@@ -589,7 +636,9 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             print(f"[PAVP] Act done: content_len={len(msg.get('content','') or '')}, "
                   f"tool_calls={len(msg.get('tool_calls',[]))}, "
                   f"finish_reason={resp['choices'][0].get('finish_reason','?')}", flush=True)
-            _update_proxy_state("DONE")
+            # 如果已进入 Verify 模式，保持 VERIFYING 状态；否则标记为 DONE
+            if "Verify" not in pavp_stage:
+                _update_proxy_state("DONE")
 
             return {
                 "id": response_id, "object": "chat.completion",
@@ -606,6 +655,256 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             print(f"[PAVP] Error: {e}\n{traceback.format_exc()}", flush=True)
             _update_proxy_state("IDLE")
             return JSONResponse(status_code=500, content={"error": {"message": str(e)}})
+
+    # =====================================================================
+    # Anthropic Messages API (Claude Code compatible)
+    # =====================================================================
+
+    @app.post("/v1/messages")
+    async def messages_anthropic(request: Request):
+        """Anthropic-compatible Messages API endpoint.
+
+        Converts Anthropic-format requests to OpenAI format,
+        forwards to the internal Plan/Act pipeline,
+        and converts responses back to Anthropic format.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON"}},
+            )
+
+        # Authentication: accept x-api-key (Anthropic style) or
+        # Authorization: Bearer (OpenAI/OAuth fallback).
+        # This is a local proxy endpoint for Claude Code compatibility.
+        # Claude Code sends its own ANTHROPIC_API_KEY in x-api-key, which
+        # won't match litellm_master_key. We only require a non-empty key
+        # to allow the connection while still rejecting obviously invalid requests.
+        api_key = request.headers.get("x-api-key", "")
+        if not api_key:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                api_key = auth_header[7:]
+        if not api_key:
+            return JSONResponse(
+                status_code=401,
+                content={"type": "error", "error": {"type": "authentication_error", "message": "Missing API key"}},
+            )
+
+        model = body.get("model", "pavp")
+        is_stream = body.get("stream", False)
+        anthropic_messages = body.get("messages", [])
+        system = body.get("system", "")
+
+        # ---- Convert Anthropic messages to OpenAI format ----
+        openai_messages: list[dict] = []
+        if system:
+            openai_messages.append({"role": "system", "content": system})
+        for msg in anthropic_messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                text_parts: list[str] = []
+                for block in content:
+                    bt = block.get("type", "")
+                    if bt == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif bt == "tool_use":
+                        text_parts.append(
+                            f"[Tool: {block.get('name', '?')}("
+                            f"{json.dumps(block.get('input', {}), ensure_ascii=False)})]"
+                        )
+                    elif bt == "tool_result":
+                        tc = block.get("content", "")
+                        if isinstance(tc, list):
+                            tc = " ".join(
+                                c.get("text", "") for c in tc
+                                if isinstance(c, dict) and c.get("type") == "text"
+                            )
+                        text_parts.append(str(tc))
+                content = "".join(text_parts)
+            openai_messages.append({"role": role, "content": content})
+
+        # ---- Convert Anthropic tools to OpenAI format ----
+        openai_tools: Optional[list[dict]] = None
+        if "tools" in body:
+            openai_tools = []
+            for tool in body["tools"]:
+                openai_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name", ""),
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("input_schema", {}),
+                    },
+                })
+
+        # ---- Build OpenAI-format request body ----
+        openai_body: dict[str, Any] = {
+            "model": "pavp",
+            "messages": openai_messages,
+            "stream": is_stream,
+            "max_tokens": body.get("max_tokens", 4096),
+            "pavp_api_format": "anthropic",
+        }
+        if openai_tools:
+            openai_body["tools"] = openai_tools
+        if "temperature" in body:
+            openai_body["temperature"] = body["temperature"]
+        if "top_p" in body:
+            openai_body["top_p"] = body["top_p"]
+        if "stop_sequences" in body:
+            openai_body["stop"] = body["stop_sequences"]
+        if "tool_choice" in body:
+            openai_body["tool_choice"] = body["tool_choice"]
+
+        # ---- Forward to internal chat completions endpoint ----
+        port = s.get("proxy_port", DEFAULT_PORT)
+        openai_url = f"http://127.0.0.1:{port}/v1/chat/completions"
+
+        # Use litellm_master_key for internal forwarding (the internal
+        # /v1/chat/completions endpoint authenticates against this key).
+        internal_key = s.get("litellm_master_key", "sk-pavp-local")
+
+        if is_stream:
+            # Use non-streaming internally, then simulate SSE stream.
+            # Real-time OpenAI→Anthropic stream conversion loses tool_use
+            # blocks (tool_call deltas in OpenAI have no text content).
+            # By buffering the full response we can faithfully emit all
+            # content (text + tool_use) as proper Anthropic SSE events.
+            async def _anthropic_stream():
+                nonlocal openai_body
+                msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+                non_stream_body = dict(openai_body)
+                non_stream_body["stream"] = False
+                try:
+                    async with httpx.AsyncClient(timeout=600) as client:
+                        openai_resp = await client.post(
+                            openai_url,
+                            headers={"Authorization": f"Bearer {internal_key}"},
+                            json=non_stream_body,
+                        )
+                        openai_resp.raise_for_status()
+                        data = openai_resp.json()
+                except Exception as e:
+                    print(f"[PAVP] Anthropic stream (internal) error: {e}", flush=True)
+                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n"
+                    return
+
+                # ---- Convert OpenAI response to Anthropic content blocks ----
+                choices = data.get("choices", [{}])
+                choice = choices[0] if choices else {}
+                message = choice.get("message", {})
+                resp_content = message.get("content", "")
+                tool_calls = message.get("tool_calls", [])
+                finish_reason = choice.get("finish_reason", "stop")
+
+                anthropic_blocks: list[dict] = []
+                if resp_content:
+                    anthropic_blocks.append({"type": "text", "text": resp_content})
+                if tool_calls:
+                    for tc in tool_calls:
+                        func = tc.get("function", {})
+                        try:
+                            args = json.loads(func.get("arguments", "{}"))
+                        except json.JSONDecodeError:
+                            args = {}
+                        anthropic_blocks.append({
+                            "type": "tool_use",
+                            "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:12]}"),
+                            "name": func.get("name", ""),
+                            "input": args,
+                        })
+
+                # ---- Emit Anthropic SSE events ----
+                sr_map = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
+                anthropic_sr = sr_map.get(finish_reason, "end_turn")
+                usage = data.get("usage", {})
+
+                yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': model, 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': usage.get('prompt_tokens', 0), 'output_tokens': 0}}})}\n\n"
+
+                for idx, block in enumerate(anthropic_blocks):
+                    bt = block.get("type")
+                    if bt == "text":
+                        text = block.get("text", "")
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                        if text:
+                            yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'text_delta', 'text': text}})}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx})}\n\n"
+                    elif bt == "tool_use":
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'tool_use', 'id': block.get('id'), 'name': block.get('name'), 'input': {}}})}\n\n"
+                        input_json = json.dumps(block.get("input", {}), ensure_ascii=False)
+                        if input_json and input_json != "{}":
+                            yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'input_json_delta', 'partial_json': input_json}})}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx})}\n\n"
+
+                yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': anthropic_sr, 'stop_sequence': None}, 'usage': {'output_tokens': usage.get('completion_tokens', 0)}})}\n\n"
+                yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+
+            return StreamingResponse(_anthropic_stream(), media_type="text/event-stream")
+
+        # ---- Non-streaming ----
+        try:
+            async with httpx.AsyncClient(timeout=600) as client:
+                openai_resp = await client.post(
+                    openai_url,
+                    headers={"Authorization": f"Bearer {internal_key}"},
+                    json=openai_body,
+                )
+                openai_resp.raise_for_status()
+                data = openai_resp.json()
+        except Exception as e:
+            print(f"[PAVP] Anthropic forward error: {e}", flush=True)
+            return JSONResponse(
+                status_code=502,
+                content={"type": "error", "error": {"type": "api_error", "message": str(e)}},
+            )
+
+        # ---- Convert OpenAI response to Anthropic format ----
+        choices = data.get("choices", [{}])
+        choice = choices[0] if choices else {}
+        message = choice.get("message", {})
+        resp_content = message.get("content", "")
+        tool_calls = message.get("tool_calls", [])
+
+        anthropic_content: list[dict] = []
+        if resp_content:
+            anthropic_content.append({"type": "text", "text": resp_content})
+        if tool_calls:
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                try:
+                    args = json.loads(func.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    args = {}
+                anthropic_content.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:12]}"),
+                    "name": func.get("name", ""),
+                    "input": args,
+                })
+
+        stop_reason = choice.get("finish_reason", "stop")
+        sr_map = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
+        usage = data.get("usage", {})
+
+        return {
+            "id": f"msg_{uuid.uuid4().hex[:12]}",
+            "type": "message",
+            "role": "assistant",
+            "content": anthropic_content,
+            "model": model,
+            "stop_reason": sr_map.get(stop_reason, "end_turn"),
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            },
+            "pavp_stage": data.get("pavp_stage", ""),
+            "task_key": data.get("task_key", ""),
+        }
 
     return app
 
@@ -708,9 +1007,11 @@ def run_server(host="0.0.0.0", port=None):
     print(f"  Settings file: {settings_file}", flush=True)
     print(f"  Home dir:      {Path.home()}", flush=True)
     print(f"  Listen:        http://{host}:{actual_port}", flush=True)
-    print(f"  Plan:          {s.get('plan_model','?')} @ {s.get('plan_base_url','?')}", flush=True)
-    print(f"  Act:           {s.get('act_model','?')} @ {s.get('act_base_url','?')}", flush=True)
-    print(f"  Ready:         {bool(s.get('plan_model') and s.get('plan_api') and s.get('act_model') and s.get('act_api'))}", flush=True)
+    _plan_cfg = get_plan_config(s)
+    _act_cfg = get_act_config(s)
+    print(f"  Plan:          {_plan_cfg['model'] or '?'} @ {_plan_cfg['openai_base_url'] or '?'}", flush=True)
+    print(f"  Act:           {_act_cfg['model'] or '?'} @ {_act_cfg['openai_base_url'] or '?'}", flush=True)
+    print(f"  Ready:         {bool(_plan_cfg['model'] and _plan_cfg['openai_api'] and _act_cfg['model'] and _act_cfg['openai_api'])}", flush=True)
     try:
         uvicorn.run(app, host=host, port=actual_port, log_level="info")
     finally:

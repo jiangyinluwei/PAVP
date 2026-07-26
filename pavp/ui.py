@@ -21,10 +21,16 @@ if _PROJECT_ROOT not in sys.path:
 import streamlit as st
 
 try:
-    from .settings import load as load_settings, settings_path, save_field, DEFAULT_PORT
+    from .settings import (load as load_settings, settings_path, save_field, DEFAULT_PORT,
+                           get_plan_config, get_act_config,
+                           get_current_plan_id, get_current_act_id,
+                           get_plan_config_ids, get_act_config_ids)
     from .auto_start import set_auto_start
 except ImportError:
-    from pavp.settings import load as load_settings, settings_path, save_field, DEFAULT_PORT
+    from pavp.settings import (load as load_settings, settings_path, save_field, DEFAULT_PORT,
+                               get_plan_config, get_act_config,
+                               get_current_plan_id, get_current_act_id,
+                               get_plan_config_ids, get_act_config_ids)
     from pavp.auto_start import set_auto_start
 
 import httpx
@@ -35,6 +41,17 @@ def _html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+def _guess_provider(url: str, model: str = "") -> str:
+    """Guess API provider from URL pattern.
+    
+    OpenAI-compatible APIs use /v1 in the base URL (e.g., http://localhost:5401/v1).
+    Anthropic APIs do not have /v1 (e.g., http://localhost:5401).
+    """
+    if "/v1" in url:
+        return "openai"
+    return "anthropic"
+
+
 # ============================================================================
 # PID file for proxy persistence
 # ============================================================================
@@ -42,6 +59,38 @@ _PID_FILE = Path.home() / ".pavp" / "proxy.pid"
 _LOG_FILE = Path(_PROJECT_ROOT) / "log" / "pavp_proxy.log"
 # 手动停止标记文件：用户点击 Stop Proxy 时写入时间戳，防止页面刷新后 auto_start 重新启动
 _MANUAL_STOP_FILE = Path.home() / ".pavp" / "manual_stop.txt"
+# 代理启动时的模型配置快照，用于检测 UI 选择是否与运行中的代理一致
+_PROXY_CONFIG_SNAPSHOT = Path.home() / ".pavp" / "proxy_config_snapshot.json"
+
+
+def _save_config_snapshot():
+    """保存当前选中的模型配置快照。"""
+    s = load_settings()
+    snapshot = {
+        "current_plan_id": get_current_plan_id(s),
+        "current_act_id": get_current_act_id(s),
+        "plan_model": get_plan_config(s)["model"],
+        "act_model": get_act_config(s)["model"],
+    }
+    _PROXY_CONFIG_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+    _PROXY_CONFIG_SNAPSHOT.write_text(
+        json.dumps(snapshot, ensure_ascii=False), encoding="utf-8-sig"
+    )
+
+
+def _config_mismatch() -> bool:
+    """检查当前 UI 选择的模型配置是否与运行中的代理不一致。"""
+    if not _PROXY_CONFIG_SNAPSHOT.exists():
+        return False
+    try:
+        snapshot = json.loads(_PROXY_CONFIG_SNAPSHOT.read_text(encoding="utf-8-sig"))
+        s = load_settings()
+        return (
+            snapshot.get("current_plan_id") != get_current_plan_id(s)
+            or snapshot.get("current_act_id") != get_current_act_id(s)
+        )
+    except Exception:
+        return False
 
 
 def _pid_alive(pid: int) -> bool:
@@ -121,6 +170,37 @@ def _is_proxy_running(port: int | None = None) -> tuple[bool, bool]:
         return True, models_ready
     except (ValueError, IOError):
         return False, False
+
+
+def _get_cached_proxy_status(port: int) -> tuple[bool, bool]:
+    """Get proxy status with session_state caching.
+
+    Cache TTL is 2 seconds to avoid blocking full page re-renders
+    with HTTP calls (health/info endpoints).  The independent
+    @st.fragment(run_every=2.0) keeps the cache refreshed so the
+    main script almost always finds a fresh entry.
+
+    When the cache is stale, a real check is performed and the
+    result is stored back.
+    """
+    now = time.time()
+    cache = st.session_state.get("_proxy_status_cache")
+    if cache is not None and cache.get("port") == port and (now - cache["timestamp"]) < 2.0:
+        return cache["alive"], cache["ready"]
+
+    alive, ready = _is_proxy_running(port)
+    st.session_state["_proxy_status_cache"] = {
+        "alive": alive,
+        "ready": ready,
+        "port": port,
+        "timestamp": now,
+    }
+    return alive, ready
+
+
+def _invalidate_proxy_status_cache():
+    """Force the next _get_cached_proxy_status() to perform a real check."""
+    st.session_state.pop("_proxy_status_cache", None)
 
 
 def _read_pid() -> int:
@@ -226,6 +306,9 @@ def _start_proxy(port: int):
         # Clear any previous startup error on successful process launch
         st.session_state.proxy_start_error = None
 
+        # Save config snapshot for Restart Proxy detection
+        _save_config_snapshot()
+
         # Re-read settings to get the actual port (proxy may have auto-incremented)
         try:
             new_settings = load_settings()
@@ -275,6 +358,8 @@ def _stop_proxy():
     # 记录手动停止时间戳，防止页面刷新后 auto_start 重新启动
     _MANUAL_STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
     _MANUAL_STOP_FILE.write_text(str(time.time()))
+    # 清理配置快照
+    _PROXY_CONFIG_SNAPSHOT.unlink(missing_ok=True)
 
     pid = _read_pid()
     result_parts = []
@@ -485,16 +570,6 @@ div[data-testid="stStatusWidget"] > div > div::after {
     background: rgba(0,0,0,0.03);
 }
 
-/* URL truncation in sidebar captions */
- .sidebar-url {
-     display: inline-block;
-     max-width: 180px;
-     overflow: hidden;
-     text-overflow: ellipsis;
-     white-space: nowrap;
-     vertical-align: middle;
- }
-
 /* Fixed-width sidebar — fully disable CSS resize property + hide any resize handle */
 section[data-testid="stSidebar"] {
     min-width: 280px !important;
@@ -612,7 +687,97 @@ section[data-testid="stSidebar"] .stButton {
     66%  { width: 1.2em; }
     100% { width: 1.4em; }
 }
+
+/* Sidebar config selectbox: look like a clickable label, not an input */
+/* Override the global "cursor: text" rule for ALL sidebar inputs */
+section[data-testid="stSidebar"] input,
+section[data-testid="stSidebar"] textarea,
+section[data-testid="stSidebar"] [contenteditable="true"],
+div[data-testid="stSidebar"] input,
+div[data-testid="stSidebar"] textarea,
+div[data-testid="stSidebar"] [contenteditable="true"] {
+    cursor: default !important;
+}
+div[data-testid="stSidebar"] div[data-testid="stSelectbox"] [role="combobox"],
+div[data-testid="stSidebar"] div[data-testid="stSelectbox"] input {
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    outline: none !important;
+    padding: 0 !important;
+    caret-color: transparent !important;
+    cursor: default !important;
+    user-select: none !important;
+    -webkit-user-select: none !important;
+}
+div[data-testid="stSidebar"] div[data-testid="stSelectbox"] > div {
+    border: none !important;
+    background: none !important;
+    box-shadow: none !important;
+    min-height: 22px !important;
+    padding: 0 !important;
+    cursor: default !important;
+}
+div[data-testid="stSidebar"] div[data-testid="stSelectbox"] > div:focus-within {
+    outline: none !important;
+    box-shadow: none !important;
+}
+/* Remove label row gap inside column */
+div[data-testid="stSidebar"] div[data-testid="column"] {
+    gap: 0 !important;
+}
  </style>""", unsafe_allow_html=True)
+
+# --- Make sidebar selectbox combobox inputs read-only ---
+# In Streamlit 1.59+ the selectbox uses a React Aria <input role="combobox">
+# that allows typing to filter. We set readOnly=true so the selected value
+# text cannot be edited from the keyboard, while click-to-open still works.
+try:
+    import streamlit.components.v1 as components
+    components.html("""
+    <script>
+    (function() {
+        function lockSidebarSelectboxes() {
+            const sidebar = parent.document.querySelector('section[data-testid="stSidebar"]');
+            if (!sidebar) return;
+            const inputs = sidebar.querySelectorAll('div[data-testid="stSelectbox"] input[role="combobox"], div[data-testid="stSelectbox"] input');
+            inputs.forEach(function(inp) {
+                if (!inp.dataset.pavpLocked) {
+                    inp.setAttribute('readonly', 'readonly');
+                    inp.readOnly = true;
+                    // Block typing keys but allow click events to bubble for dropdown open
+                    inp.addEventListener('keydown', function(e) {
+                        // Allow Tab for navigation, block all other keys
+                        if (e.key !== 'Tab') {
+                            e.preventDefault();
+                        }
+                    });
+                    inp.dataset.pavpLocked = '1';
+                }
+            });
+        }
+        // Run on load and observe DOM mutations (Streamlit re-renders frequently)
+        lockSidebarSelectboxes();
+        const observer = new MutationObserver(function() { lockSidebarSelectboxes(); });
+        const target = parent.document.querySelector('section[data-testid="stSidebar"]');
+        if (target) {
+            observer.observe(target, { childList: true, subtree: true });
+        } else {
+            // Retry until sidebar exists
+            const retry = setInterval(function() {
+                const t = parent.document.querySelector('section[data-testid="stSidebar"]');
+                if (t) {
+                    clearInterval(retry);
+                    lockSidebarSelectboxes();
+                    observer.observe(t, { childList: true, subtree: true });
+                }
+            }, 500);
+        }
+    })();
+    </script>
+    """, height=0, width=0)
+except Exception:
+    pass
 
 st.title("PAVP Proxy")
 
@@ -625,17 +790,28 @@ _API_CALL_TIMEOUT = 30  # seconds — 匹配 LLM 超时 (30s)，防止思考超�
 
 
 def _read_orchestrator_state() -> dict | None:
-    """Read orchestrator state file. Returns None if last API call is stale (>50s)."""
+    """Read orchestrator state file. Returns None if proxy is not running or last API call is stale."""
     try:
         if not _STATE_FILE.exists():
             return None
-        data = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+
+        # 检查代理进程是否存活 — 如果代理未运行，状态文件是残留的旧数据
+        if not _PID_FILE.exists():
+            return None
+        try:
+            pid = int(_PID_FILE.read_text().strip())
+            if not _pid_alive(pid):
+                return None
+        except (ValueError, OSError):
+            return None
+
+        data = json.loads(_STATE_FILE.read_text(encoding="utf-8-sig"))
         # Use last_api_call if available, otherwise fall back to updated_at
         ts = data.get("last_api_call") or data.get("updated_at", "")
         if not ts:
             return None
         age = time.time() - datetime.fromisoformat(ts).timestamp()
-        if age > _API_CALL_TIMEOUT:  # 50 seconds
+        if age > _API_CALL_TIMEOUT:  # 30 seconds
             return None
         return data
     except Exception:
@@ -758,7 +934,7 @@ if "proxy_port" not in st.session_state:
     st.session_state.proxy_port = st.session_state.settings_cache.get("proxy_port", DEFAULT_PORT)
 
 # Check real proxy status (not session state)
-proxy_alive, proxy_ready = _is_proxy_running(st.session_state.proxy_port)
+proxy_alive, proxy_ready = _get_cached_proxy_status(st.session_state.proxy_port)
 
 # Auto-sync port: if the running proxy is on a different port than settings,
 # update settings.json and session state to match the actual port.
@@ -796,6 +972,7 @@ if _auto_start_val and not proxy_alive and not st.session_state.auto_start_attem
         _start_proxy(port)
         # Wait for proxy to become healthy (up to 10s) instead of fixed sleep
         _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+        _invalidate_proxy_status_cache()
         st.rerun()
 
 
@@ -816,33 +993,67 @@ if st.sidebar.button("🔄 Refresh", use_container_width=True):
 # --- Model config in sidebar ---
 s = st.session_state.settings_cache
 
-plan_model = s.get("plan_model", "")
-plan_api = s.get("plan_api", "")
-plan_url = s.get("plan_base_url", "")
-act_model = s.get("act_model", "")
-act_api = s.get("act_api", "")
-act_url = s.get("act_base_url", "")
-
-plan_ok = bool(plan_model and plan_api and plan_url)
-act_ok = bool(act_model and act_api and act_url)
+# Get available config IDs and current selection
+_plan_ids = get_plan_config_ids(s)
+_act_ids = get_act_config_ids(s)
+_current_plan_id = get_current_plan_id(s)
+_current_act_id = get_current_act_id(s)
 
 st.sidebar.divider()
-st.sidebar.markdown("**Plan/Verify**")
-st.sidebar.caption(f"Model: `{plan_model or '—'}`")
-_plan_url_display = _html_escape(plan_url or '—')
-st.sidebar.markdown(
-    f'URL: <code class="sidebar-url">{_plan_url_display}</code>  {"✅" if plan_ok else "⬜"}',
-    unsafe_allow_html=True,
-)
+st.sidebar.markdown("**Plan/Verify Model**")
+
+# Plan config combo box — inline with Config label
+_plan_id_options = [f"plan_{i}" for i in _plan_ids]
+_plan_idx = _plan_ids.index(_current_plan_id) if _current_plan_id in _plan_ids else 0
+_plan_cfg_col, _plan_sel_col = st.sidebar.columns([0.22, 0.55], vertical_alignment="center")
+with _plan_cfg_col:
+    st.markdown("**Config**")
+with _plan_sel_col:
+    _selected_plan_label = st.selectbox(
+        "", options=_plan_id_options, index=_plan_idx, key="plan_config_selector",
+        label_visibility="collapsed"
+    )
+_selected_plan_id = int(_selected_plan_label.split("_")[1])
+if _selected_plan_id != _current_plan_id:
+    save_field("current_plan_id", _selected_plan_id)
+    st.session_state.settings_cache = load_settings()
+    st.rerun()
+
+# Show current plan config details
+_plan_cfg = get_plan_config(s, _selected_plan_id)
+plan_ok = bool(_plan_cfg["model"] and _plan_cfg["openai_api"] and _plan_cfg["openai_base_url"])
+plan_model = _plan_cfg["model"]
+plan_api = _plan_cfg["openai_api"]
+plan_url = _plan_cfg["openai_base_url"]
+st.sidebar.caption(f"Model: `{plan_model or '—'}`{' ✅' if plan_ok else ''}")
 
 st.sidebar.divider()
-st.sidebar.markdown("**Act**")
-st.sidebar.caption(f"Model: `{act_model or '-'}`")
-_act_url_display = _html_escape(act_url or '—')
-st.sidebar.markdown(
-    f'URL: <code class="sidebar-url">{_act_url_display}</code>  {"✅" if act_ok else "⬜"}',
-    unsafe_allow_html=True,
-)
+st.sidebar.markdown("**Act Model**")
+
+# Act config combo box — inline with Config label
+_act_id_options = [f"act_{i}" for i in _act_ids]
+_act_idx = _act_ids.index(_current_act_id) if _current_act_id in _act_ids else 0
+_act_cfg_col, _act_sel_col = st.sidebar.columns([0.22, 0.55], vertical_alignment="center")
+with _act_cfg_col:
+    st.markdown("**Config**")
+with _act_sel_col:
+    _selected_act_label = st.selectbox(
+        "", options=_act_id_options, index=_act_idx, key="act_config_selector",
+        label_visibility="collapsed"
+    )
+_selected_act_id = int(_selected_act_label.split("_")[1])
+if _selected_act_id != _current_act_id:
+    save_field("current_act_id", _selected_act_id)
+    st.session_state.settings_cache = load_settings()
+    st.rerun()
+
+# Show current act config details
+_act_cfg = get_act_config(s, _selected_act_id)
+act_ok = bool(_act_cfg["model"] and _act_cfg["openai_api"] and _act_cfg["openai_base_url"])
+act_model = _act_cfg["model"]
+act_api = _act_cfg["openai_api"]
+act_url = _act_cfg["openai_base_url"]
+st.sidebar.caption(f"Model: `{act_model or '—'}`{' ✅' if act_ok else ''}")
 
 # --- Loop mode toggle (bottom-left) ---
 st.sidebar.divider()
@@ -906,14 +1117,29 @@ proxy_url = f"http://localhost:{port}/v1"
 _has_error = bool(st.session_state.get("proxy_start_error"))
 
 if proxy_alive:
-    # Running: only show Stop + Health
-    col_stop, col_health = st.columns(2)
-    if col_stop.button("■ Stop Proxy", use_container_width=True):
-        _stop_proxy()
-        st.session_state.proxy_stop_time = time.time()
-        # Wait for proxy to actually stop (up to 5s) instead of fixed sleep
-        _wait_until(lambda: not _is_proxy_running(port)[0], timeout=5.0, interval=0.1)
-        st.rerun()
+    # Running: check if proxy config differs from UI selection
+    _needs_restart = _config_mismatch()
+    if _needs_restart:
+        col_restart, col_health = st.columns(2)
+        if col_restart.button("↻ Restart Proxy", type="primary", use_container_width=True):
+            _stop_proxy()
+            st.session_state.pop("proxy_stop_time", None)
+            # Wait for stop to complete (poll up to 5s), then start with new config
+            _wait_until(lambda: not _is_proxy_running(port)[0], timeout=5.0, interval=0.1)
+            _start_proxy(port)
+            # Wait for proxy to become healthy (up to 10s)
+            _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+            _invalidate_proxy_status_cache()
+            st.rerun()
+    else:
+        col_stop, col_health = st.columns(2)
+        if col_stop.button("■ Stop Proxy", use_container_width=True):
+            _stop_proxy()
+            st.session_state.proxy_stop_time = time.time()
+            # Wait for proxy to actually stop (up to 5s) instead of fixed sleep
+            _wait_until(lambda: not _is_proxy_running(port)[0], timeout=5.0, interval=0.1)
+            _invalidate_proxy_status_cache()
+            st.rerun()
     if col_health.button("🔍 Health", use_container_width=True):
         _run_health_check(port)
         st.rerun()
@@ -928,6 +1154,7 @@ elif _has_error:
         _start_proxy(port)
         # Wait for proxy to become healthy (up to 10s) instead of fixed sleep
         _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+        _invalidate_proxy_status_cache()
         st.rerun()
     if col_health.button("🔍 Health", use_container_width=True):
         _run_health_check(port)
@@ -942,6 +1169,7 @@ else:
         st.session_state.pop("proxy_stop_time", None)
         # Wait for proxy to become healthy (up to 10s) instead of fixed sleep
         _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+        _invalidate_proxy_status_cache()
         st.rerun()
     if col_health.button("🔍 Health", use_container_width=True):
         _run_health_check(port)
@@ -951,7 +1179,7 @@ else:
 # ============================================================================
 # Status display
 # ============================================================================
-proxy_alive, proxy_ready = _is_proxy_running(port)
+proxy_alive, proxy_ready = _get_cached_proxy_status(port)
 
 # The status indicator (Plan/Act field) is auto-refreshed via the
 # @st.fragment(run_every=2.0) decorator on _render_status_fragment() above.
@@ -970,10 +1198,13 @@ elif "proxy_stop_time" in st.session_state:
 
 if proxy_alive:
     if proxy_ready:
-        st.success(f"🟢 Running — Proxy API at `{proxy_url}`")
+        st.success("🟢 Running — Proxy API Ready")
         api_key = s.get("litellm_master_key", "sk-pavp-local")
+        proxy_url_no_v1 = proxy_url.removesuffix("/v1")
+        plan_provider = _guess_provider(proxy_url, plan_model)
+        act_provider = _guess_provider(proxy_url_no_v1, act_model)
         st.code(
-            f"base_url = \"{proxy_url}\"\n"
+            f"base_url = \"{proxy_url}\"({plan_provider}) / \"{proxy_url_no_v1}\"({act_provider})\n"
             f"api_key  = \"{api_key}\"\n"
             f"model    = \"pavp\"",
             language="python",

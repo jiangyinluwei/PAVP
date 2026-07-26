@@ -40,11 +40,11 @@ PAVP 本质上是一个 **LLM 编排层**，通过本地代理服务实现：
 1. **运行启动脚本**：双击或运行 `run.ps1`，自动检查 Python 环境（python 版本、依赖包）并安装缺失项，然后打开 Streamlit 控制面板
 2. **填写配置**：编辑 `~/.pavp/settings.json`，填入 plan_model / plan_api / plan_base_url 和 act_model / act_api / act_base_url（运行 `run.ps1` 时自动生成模板）
 3. **启动代理**：在 UI 中点击 "Start Proxy"，或直接运行 `python -m pavp.proxy_server`
-4. **挂载到 Agent**：将 Agent 的 API 地址改为 `http://localhost:4001/v1`，API Key 改为 `sk-pavp-local`，模型名改为 `pavp`
+4. **挂载到 Agent**：将 Agent 的 API 地址改为 `http://localhost:XXXX/v1`，API Key 改为 `sk-pavp-local`，模型名改为 `pavp`，根据UI界面展示的端口号调整（默认端口号为 `5401`）
 
 ```python
 # Agent 配置示例
-base_url = "http://localhost:4001/v1"
+base_url = "http://localhost:5401/v1"
 api_key  = "sk-pavp-local"
 model    = "pavp"
 ```
@@ -89,7 +89,7 @@ PAVP is essentially an **LLM orchestration layer** implemented as a local proxy:
 
 Each new task generates a unique `task_key` (e.g. `TK-a1b2c3d4`) in the Plan JSON, used for cross-turn context anchoring, cache isolation, and state tracking.
 
-Two modes (only Proxy Mode is maintained):
+Architecture notes:
 
 - **Proxy Mode** (recommended): Runs a local proxy server; the agent calls it via an OpenAI-compatible API, and PAVP transparently handles Plan → Act in the background
 
@@ -97,7 +97,7 @@ Two modes (only Proxy Mode is maintained):
 
 > **⚠ Windows only. Linux / macOS are NOT supported.**
 
-The project uses Windows-specific features: Registry auto-start via `winreg`, `ctypes.windll` for process management, PowerShell launcher scripts, etc.
+The project uses Windows-specific features: Registry auto-start, `ctypes.windll` for process management, PowerShell launcher scripts, etc.
 
 ### 3. How to Use
 
@@ -106,11 +106,11 @@ Essentially, you just **swap the API endpoint** — it fits perfectly into your 
 1. **Run launcher**: Run `run.ps1` — it auto-checks the Python environment (python version, dependencies) and installs missing packages, then opens the Streamlit control panel
 2. **Configure**: Edit `~/.pavp/settings.json` — fill in plan_model / plan_api / plan_base_url and act_model / act_api / act_base_url (run `run.ps1` to auto-generate a template)
 3. **Start proxy**: Click "Start Proxy" in the UI, or run `python -m pavp.proxy_server` directly
-4. **Mount to agent**: Point your agent to `http://localhost:4001/v1` with API key `sk-pavp-local` and model `pavp`
+4. **Mount to agent**: Point your agent to `http://localhost:XXXX/v1` with API key `sk-pavp-local` and model `pavp` — adjust the port based on the UI display (default port is `5401`)
 
 ```python
 # Agent configuration example
-base_url = "http://localhost:4001/v1"
+base_url = "http://localhost:5401/v1"
 api_key  = "sk-pavp-local"
 model    = "pavp"
 ```

@@ -9,11 +9,12 @@ from pydantic import BaseModel, Field
 
 
 class Verdict(str, Enum):
-    """Verify 裁决四档"""
+    """Verify 裁决五档"""
     PASS = "PASS"                        # 通过，任务结束
     SHIP_WITH_FIXES = "SHIP-WITH-FIXES"  # 可发布但有遗留
     DO_NOT_SHIP = "DO-NOT-SHIP"          # 不可发布，需 DebugPlan
     INCOMPLETE = "INCOMPLETE"            # 任务未按预期完成，需新 Plan 续接
+    NEEDS_REVIEW = "NEEDS-REVIEW"        # 模棱两可，需人工确认是否 Loop
 
 
 class TaskItem(BaseModel):
@@ -59,6 +60,7 @@ class VerifyResult(BaseModel):
     issues: list[VerifyIssue] = []
     debug_plan: Optional[Plan] = None
     new_plan: Optional[Plan] = None  # INCOMPLETE 时的续接计划
+    needs_loop: bool = False  # 发现漏洞/思考不足/可能导致其他问题时，即使 PASS 也触发 Loop
 
 
 class ActResult(BaseModel):

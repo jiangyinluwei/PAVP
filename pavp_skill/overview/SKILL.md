@@ -104,11 +104,11 @@ PAVP/
 
 | Model | Description |
 |---|---|
-| `Verdict` (Enum) | Four verdicts: PASS / SHIP_WITH_FIXES / DO_NOT_SHIP / INCOMPLETE |
+| `Verdict` (Enum) | Five verdicts: PASS / SHIP_WITH_FIXES / DO_NOT_SHIP / INCOMPLETE / NEEDS_REVIEW |
 | `TaskItem` | Single task item in a Plan (id, title, file_paths, acceptance_criteria, depends_on, status) |
 | `Plan` | Plan structure (plan_id, is_debug_plan, summary, requires_act, root_cause, tasks) |
 | `VerifyIssue` | Issue found by Verify (severity, file, line, criterion, failure_scenario, suggested_fix) |
-| `VerifyResult` | Verify output (verdict, summary, issues, debug_plan, new_plan) |
+| `VerifyResult` | Verify output (verdict, summary, issues, debug_plan, new_plan, needs_loop) |
 | `ActResult` | Act execution result (session_id, diff, files_changed, cc_output, cost_usd, success) |
 | `SessionState` | Workflow persisted state (session_id, original_requirement, plan_history, act_history, verify_history, fsm_state, iteration) |
 
@@ -119,13 +119,26 @@ PAVP/
 ```
 IDLE -> PLANNING -> ACTING -> VERIFYING -> DONE
                               |
-                              +-- PASS / SHIP_WITH_FIXES -> DONE
+                              +-- PASS / SHIP_WITH_FIXES (needs_loop=false) -> DONE
+                              +-- PASS / SHIP_WITH_FIXES (needs_loop=true) -> ACTING (supplement loop)
                               +-- DO_NOT_SHIP -> (debug_plan) -> ACTING (loop)
                               +-- INCOMPLETE -> (new_plan) -> ACTING (loop)
-                              +-- AWAITING_USER (manual mode) -> continue/ignore
+                              +-- NEEDS_REVIEW -> AWAITING_USER -> continue/ignore
                               |
                               +-- max_iterations reached -> FAILED
 ```
+
+### Loop 触发条件（宽松版）
+
+1. **DO_NOT_SHIP / INCOMPLETE**：传统触发条件，自动/手动进入 Loop
+2. **PASS / SHIP_WITH_FIXES + needs_loop=true**：即使代码通过验收标准，若 Verify 发现潜在漏洞、思考不足、可能导致其他问题，也会触发补充 Loop，使用 `new_plan` 完善 Plan 后继续 Act
+3. **NEEDS_REVIEW**：模棱两可的情况（可补充也可忽略），始终交由人工确认是否继续 Loop。若人工选择继续，则复用当前 Plan 重新执行 Act（携带 Verify issues 作为上下文）
+
+### 核心机制说明
+
+- `needs_loop` 字段独立于 verdict，允许在 PASS/SHIP_WITH_FIXES 裁决下仍触发 Loop
+- NEEDS_REVIEW 裁决专门用于"可补充也可忽略"的边界情况，确保人工介入决策
+- 两种机制共同实现"放宽 Loop 条件"的目标
 
 ---
 
@@ -136,14 +149,22 @@ Config file location: `~/.pavp/settings.json`
 Key fields:
 - `litellm_master_key`: Orchestrator auth key for calling proxy (default `sk-pavp-local`)
 - `proxy_port`: PAVP proxy listen port (default 4001)
-- `plan_api` / `plan_base_url` / `plan_model`: Plan/Verify model config (e.g. `deepseek/deepseek-reasoner`)
-- `act_api` / `act_base_url` / `act_model`: Act model config (e.g. `openai/qwen2.5-coder-32b-instruct`)
+- `plan_model`: Plan/Verify model identifier
+- `plan_openai_api` / `plan_openai_base_url`: Plan/Verify model OpenAI-compatible endpoint
+- `plan_anthropic_api` / `plan_anthropic_base_url`: Plan/Verify model Anthropic-native endpoint
+- `act_model`: Act model identifier
+- `act_openai_api` / `act_openai_base_url`: Act model OpenAI-compatible endpoint
+- `act_anthropic_api` / `act_anthropic_base_url`: Act model Anthropic-native endpoint
 - `cc_bin`: Claude Code executable path (default `claude`)
 - `act_max_budget` / `act_max_turns` / `act_timeout`: Act execution limits
 - `loop_mode`: `auto` (automatic loop) / `manual` (manual confirmation)
 - `auto_start`: Enable Windows auto-start (default `True`)
 
 Model identifier format: `provider/model` (e.g. `openai/gpt-4o-mini`, `deepseek/deepseek-reasoner`).
+
+The proxy auto-detects API format from the request endpoint:
+- `/v1/chat/completions` → uses OpenAI URLs (`plan_openai_*` / `act_openai_*`)
+- `/v1/messages` → uses Anthropic URLs (`plan_anthropic_*` / `act_anthropic_*`), falls back to OpenAI URLs if not configured.
 
 ---
 

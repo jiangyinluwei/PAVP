@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import time as _time_module
-from typing import Any, Optional
+import uuid
+from typing import Any, Generator, Optional
 
 import httpx
 
-from .settings import load as load_settings
+from .settings import load as load_settings, get_plan_config
 
 PLAN_SYSTEM = """You are a planner. Analyze the requirement, evaluate available tools, and output a structured plan as JSON.
 
@@ -62,6 +63,11 @@ Rules:
    It must be unique for each new task. Use random 8-character hex suffix after "TK-".
    The task_key field goes at the top level of the JSON output.
    When the Act model receives this plan, it will use the task_key to maintain context continuity.
+9. [PRE-VALIDATION]: Before starting to plan, you MUST first validate whether the user's input is correct:
+   - Confirm whether the "solution" or "problem" provided by the user is reasonable and correct
+   - If the user's solution or problem is wrong, incomplete, or unreasonable, clearly point out the issue and provide a correction
+   - In this case, set "requires_act": false and describe the correction in the "summary" field
+   - Only proceed with planning and execution after confirming the user's input is correct
 """
 
 def build_pvap_stage(
@@ -129,7 +135,7 @@ def _call_llm_raw(
     timeout: float = 300.0,
     extra: Optional[dict[str, Any]] = None,
 ) -> dict:
-    """Call LLM and return full response dict (may include tool_calls).
+    """Call an OpenAI-compatible LLM API and return full response dict.
 
     extra: additional payload fields (tools, tool_choice, top_p, etc.)
            merged into the request body after model/messages/temperature/max_tokens.
@@ -162,7 +168,9 @@ def _call_llm_stream(
     max_retries: int = 5,
     base_delay: float = 2.0,
 ):
-    """Call LLM with streaming enabled. Yields raw SSE lines (bytes) as they arrive.
+    """Call an OpenAI-compatible LLM API with streaming enabled.
+
+    Yields raw SSE lines (bytes) as they arrive.
 
     Retries on connection failure (common during boot before network is up).
 
@@ -208,7 +216,7 @@ def _call_llm_text(
     *, temperature: float = 0.2, max_tokens: int = 4096,
     timeout: float = 300.0,
 ) -> str:
-    """Call LLM with json_object format"""
+    """Call an OpenAI-compatible LLM API with json_object response format."""
     url = f"{base_url.rstrip('/')}/chat/completions"
     payload: dict[str, Any] = {
         "model": model,
@@ -225,6 +233,353 @@ def _call_llm_text(
 
     r = _call_llm_with_retry(_do_call)
     return r.json()["choices"][0]["message"]["content"]
+
+
+# =====================================================================
+# Anthropic Native API Support
+#
+# These functions call the Anthropic Messages API directly. They accept
+# OpenAI-format messages (for internal consistency) and convert them to
+# Anthropic format before sending. Responses are converted back to
+# OpenAI-compatible format so the rest of the pipeline sees a uniform
+# interface. Use these explicitly when the backend is an Anthropic API.
+# =====================================================================
+
+def _anthropic_messages_url(base_url: str) -> str:
+    """Build the Anthropic messages endpoint URL from a base URL."""
+    url = base_url.rstrip("/")
+    if url.endswith("/v1"):
+        return f"{url}/messages"
+    if url.endswith("/messages"):
+        return url
+    return f"{url}/v1/messages"
+
+
+def _convert_to_anthropic_messages(
+    openai_messages: list[dict],
+) -> tuple[Optional[str], list[dict]]:
+    """Convert OpenAI-format messages to Anthropic-format messages.
+
+    Anthropic uses a separate ``system`` parameter and does not support
+    a ``system`` role inside the messages array.  Tool / function messages
+    are dropped since Anthropic handles them differently.
+
+    Returns (system_prompt, anthropic_messages).
+    """
+    system = None
+    messages: list[dict] = []
+    for msg in openai_messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "system":
+            existing = system or ""
+            text = content if isinstance(content, str) else str(content)
+            system = f"{existing}\n{text}".strip() if existing else text
+        elif role in ("user", "assistant"):
+            text = content if isinstance(content, str) else str(content)
+            messages.append({"role": role, "content": text})
+        # tool / function roles are deliberately dropped – Anthropic
+        # expects tool_results inside a user message via content blocks.
+    return system, messages
+
+
+def _convert_tools_to_anthropic(openai_tools: list[dict]) -> list[dict]:
+    """Convert OpenAI tool definitions to Anthropic tool format."""
+    anthropic_tools = []
+    for tool in openai_tools:
+        func = tool.get("function", tool)
+        name = func.get("name", "")
+        desc = func.get("description", "")
+        params = func.get("parameters", {})
+        anthropic_tools.append({
+            "name": name,
+            "description": desc,
+            "input_schema": params,
+        })
+    return anthropic_tools
+
+
+def _anthropic_response_to_openai(
+    anthropic_resp: dict, model: str,
+) -> dict:
+    """Convert an Anthropic API response dict to OpenAI-compatible format."""
+    content_blocks = anthropic_resp.get("content", [])
+    text_parts: list[str] = []
+    tool_calls: list[dict] = []
+    for block in content_blocks:
+        if block.get("type") == "text":
+            text_parts.append(block.get("text", ""))
+        elif block.get("type") == "tool_use":
+            tool_calls.append({
+                "id": block.get("id", ""),
+                "type": "function",
+                "function": {
+                    "name": block.get("name", ""),
+                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
+                },
+            })
+
+    usage = anthropic_resp.get("usage", {})
+    return {
+        "id": anthropic_resp.get("id", f"msg-{uuid.uuid4().hex[:12]}"),
+        "object": "chat.completion",
+        "created": int(_time_module.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "".join(text_parts),
+            },
+            "finish_reason": _anthropic_stop_reason(anthropic_resp.get("stop_reason")),
+        }],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        },
+    }
+
+
+def _anthropic_stop_reason(stop_reason: Optional[str]) -> str:
+    mapping = {
+        "end_turn": "stop",
+        "max_tokens": "length",
+        "stop_sequence": "stop",
+        "tool_use": "tool_calls",
+    }
+    return mapping.get(stop_reason or "", "stop")
+
+
+def _call_anthropic_raw(
+    model: str, api_key: str, base_url: str,
+    messages: list[dict],
+    *, temperature: float = 0.2, max_tokens: int = 4096,
+    timeout: float = 300.0,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict:
+    """Call Anthropic API (non-streaming) and return OpenAI-compatible dict."""
+    url = _anthropic_messages_url(base_url)
+    system, anthropic_messages = _convert_to_anthropic_messages(messages)
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": anthropic_messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if system:
+        payload["system"] = system
+    if extra:
+        for k in ("metadata", "stop_sequences", "top_p", "top_k", "thinking", "output_config"):
+            if k in extra:
+                payload[k] = extra[k]
+        if "tools" in extra:
+            payload["tools"] = _convert_tools_to_anthropic(extra["tools"])
+
+    def _do_call():
+        r = httpx.post(
+            url,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return r
+
+    r = _call_llm_with_retry(_do_call)
+    return _anthropic_response_to_openai(r.json(), model)
+
+
+def _call_anthropic_stream(
+    model: str, api_key: str, base_url: str,
+    messages: list[dict],
+    *, temperature: float = 0.2, max_tokens: int = 4096,
+    timeout: float = 600.0,
+    extra: Optional[dict[str, Any]] = None,
+    max_retries: int = 5,
+    base_delay: float = 2.0,
+) -> Generator[bytes, None, None]:
+    """Call Anthropic API with streaming.
+
+    Yields OpenAI-compatible SSE lines (bytes) so the caller can treat
+    the output identically to ``_call_llm_stream``.
+    """
+    url = _anthropic_messages_url(base_url)
+    system, anthropic_messages = _convert_to_anthropic_messages(messages)
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": anthropic_messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": True,
+    }
+    if system:
+        payload["system"] = system
+    if extra:
+        for k in ("metadata", "stop_sequences", "top_p", "top_k", "thinking", "output_config"):
+            if k in extra:
+                payload[k] = extra[k]
+        if "tools" in extra:
+            payload["tools"] = _convert_tools_to_anthropic(extra["tools"])
+
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            with httpx.stream(
+                "POST", url,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+                timeout=timeout,
+            ) as resp:
+                resp.raise_for_status()
+                yield from _anthropic_stream_to_openai_sse(model, resp.iter_lines())
+            return
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                _time_module.sleep(base_delay * (2 ** attempt))
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code < 500:
+                raise
+            last_error = e
+            if attempt < max_retries - 1:
+                _time_module.sleep(base_delay * (2 ** attempt))
+    raise last_error  # type: ignore[misc]
+
+
+def _call_anthropic_text(
+    model: str, api_key: str, base_url: str,
+    messages: list[dict],
+    *, temperature: float = 0.2, max_tokens: int = 4096,
+    timeout: float = 300.0,
+) -> str:
+    """Call Anthropic API and return the text content.
+
+    Unlike ``_call_llm_text``, Anthropic does not support a native
+    ``response_format`` parameter.  The caller should ensure the prompt
+    instructs JSON output when needed.
+    """
+    url = _anthropic_messages_url(base_url)
+    system, anthropic_messages = _convert_to_anthropic_messages(messages)
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": anthropic_messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if system:
+        payload["system"] = system
+
+    def _do_call():
+        r = httpx.post(
+            url,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return r
+
+    r = _call_llm_with_retry(_do_call)
+    data = r.json()
+    text_parts = [
+        block["text"]
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    ]
+    return "".join(text_parts)
+
+
+def _anthropic_stream_to_openai_sse(
+    model: str,
+    anthropic_lines: Generator[bytes, None, None],
+) -> Generator[bytes, None, None]:
+    """Convert Anthropic SSE event stream to OpenAI-compatible SSE lines.
+
+    Each yielded value is a bytes string like ``b"data: {...}\\n\\n"``.
+    """
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    role_sent = False
+    pending_event: Optional[str] = None
+
+    for raw_line in anthropic_lines:
+        line = raw_line if isinstance(raw_line, bytes) else str(raw_line).encode("utf-8")
+        text = line.decode("utf-8", errors="replace").strip()
+
+        # Track event type (next line after "event: <type>" is "data: ...")
+        if text.startswith("event: "):
+            pending_event = text[7:]
+            continue
+
+        if not text.startswith("data: "):
+            pending_event = None
+            continue
+
+        data_str = text[6:]
+        try:
+            event_data = json.loads(data_str)
+        except json.JSONDecodeError:
+            pending_event = None
+            continue
+
+        event_type = pending_event or event_data.get("type", "")
+        pending_event = None
+
+        if event_type == "content_block_delta":
+            delta = event_data.get("delta", {})
+            if delta.get("type") == "text_delta":
+                chunk: dict[str, Any] = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(_time_module.time()),
+                    "model": model,
+                    "choices": [{
+                        "index": event_data.get("index", 0),
+                        "delta": {},
+                        "finish_reason": None,
+                    }],
+                }
+                if not role_sent:
+                    chunk["choices"][0]["delta"]["role"] = "assistant"
+                    role_sent = True
+                chunk["choices"][0]["delta"]["content"] = delta.get("text", "")
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        elif event_type == "message_delta":
+            msg_delta = event_data.get("delta", {})
+            stop_reason = msg_delta.get("stop_reason")
+            chunk = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": int(_time_module.time()),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": _anthropic_stop_reason(stop_reason) if stop_reason else None,
+                }],
+            }
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        elif event_type == "message_stop":
+            yield b"data: [DONE]\n\n"
+
+        # message_start, content_block_start, content_block_stop, ping are ignored
 
 
 # Keywords that indicate a tool can spawn/delegate to sub-agents
@@ -292,13 +647,24 @@ def _describe_tools(tools: list[dict]) -> str:
 
 
 def make_plan(prompt: str, project_root: str, settings: Optional[dict] = None,
-              tools: Optional[list[dict]] = None) -> str:
+              tools: Optional[list[dict]] = None,
+              *, base_url: str = "", api_key: str = "",
+              use_anthropic_caller: bool = False) -> str:
     """Run only the Plan phase. Returns plan JSON string.
 
     tools: tool definitions from the agent request, injected as text context
            so the planner knows what capabilities are available.
+    base_url, api_key: optional overrides for the plan model endpoint.
+           When not provided, falls back to plan_openai_* fields in settings.
+    use_anthropic_caller: force Anthropic-native caller (e.g. when the backend
+           is an Anthropic-compatible proxy like DeepSeek /anthropic endpoint).
     """
     s = settings or load_settings()
+    plan_cfg = get_plan_config(s)
+    if not base_url:
+        base_url = plan_cfg["openai_base_url"]
+    if not api_key:
+        api_key = plan_cfg["openai_api"]
     tools_context = _describe_tools(tools) if tools else ""
     user_content = f"Project: {project_root}\n\nRequirement:\n{prompt}"
     if tools_context:
@@ -307,7 +673,13 @@ def make_plan(prompt: str, project_root: str, settings: Optional[dict] = None,
         {"role": "system", "content": PLAN_SYSTEM},
         {"role": "user", "content": user_content},
     ]
-    return _call_llm_text(s["plan_model"], s["plan_api"], s["plan_base_url"], messages,
+    # Use native Anthropic caller when explicitly flagged or the backend URL
+    # is a genuine Anthropic endpoint.
+    use_anthropic = use_anthropic_caller or "anthropic.com" in base_url.lower()
+    if use_anthropic:
+        return _call_anthropic_text(plan_cfg["model"], api_key, base_url, messages,
+                                    max_tokens=4096)
+    return _call_llm_text(plan_cfg["model"], api_key, base_url, messages,
                           max_tokens=4096)
 
 

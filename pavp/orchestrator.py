@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,8 +55,30 @@ def _write_state_file(state: SessionState) -> None:
         "last_api_call": now,
         "updated_at": now,
     }
+    # 添加 plan_id（作为 task_key）供 UI 展示 &N TK-xxx 前缀
+    if state.current_plan and state.current_plan.plan_id:
+        data["task_key_count"] = 1
+        data["task_key_sample"] = state.current_plan.plan_id
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8-sig")
+
+
+def _start_verify_state_updater(state: SessionState, interval: float = 15.0) -> threading.Event:
+    """启动后台线程，定期刷新状态文件，防止长时间 LLM 调用导致 UI 超时显示 Standby。
+
+    在阻塞式 LLM 调用（如 _run_verify）期间使用。
+    返回一个 threading.Event，调用方在操作完成后应调用 .set() 停止后台线程。
+    """
+    stop_event = threading.Event()
+
+    def _update_loop():
+        while not stop_event.is_set():
+            _write_state_file(state)
+            stop_event.wait(timeout=interval)
+
+    t = threading.Thread(target=_update_loop, daemon=True)
+    t.start()
+    return stop_event
 
 
 class Orchestrator:
@@ -210,12 +233,12 @@ class Orchestrator:
             )
 
             # ---- 裁决分支 ----
-            if verify.verdict == Verdict.PASS:
+            if verify.verdict == Verdict.PASS and not verify.needs_loop:
                 state.fsm_state = "DONE"
                 self._emit(on_event, "done", {"reason": "pass", "iterations": state.iteration}, state=state)
                 return state
 
-            if verify.verdict == Verdict.SHIP_WITH_FIXES:
+            if verify.verdict == Verdict.SHIP_WITH_FIXES and not verify.needs_loop:
                 state.fsm_state = "DONE"
                 self._emit(
                     on_event,
@@ -225,47 +248,27 @@ class Orchestrator:
                 )
                 return state
 
-            # DO_NOT_SHIP 或 INCOMPLETE -> 需要继续循环
-            if state.iteration >= state.max_iterations:
-                state.fsm_state = "FAILED"
-                self._emit(
-                    on_event,
-                    "failed",
-                    {"reason": f"达到最大迭代次数 {state.max_iterations}"},
-                    state=state,
-                )
-                return state
-
-            # 确定续接计划
-            if verify.verdict == Verdict.DO_NOT_SHIP:
-                next_plan = verify.debug_plan
-                plan_event = "debug_plan_adopted"
-                plan_label = "debug_plan"
-            elif verify.verdict == Verdict.INCOMPLETE:
+            # PASS/SHIP_WITH_FIXES + needs_loop=true: 有漏洞/思考不足，需要补充 Plan 后继续 Loop
+            if verify.verdict in (Verdict.PASS, Verdict.SHIP_WITH_FIXES) and verify.needs_loop:
+                # 视为 INCOMPLETE 处理，使用 new_plan 作为续接计划
+                if verify.new_plan is None:
+                    state.fsm_state = "FAILED"
+                    self._emit(
+                        on_event,
+                        "failed",
+                        {"reason": f"{verify.verdict.value} 但 needs_loop=true 且 Verify 未输出 new_plan"},
+                        state=state,
+                    )
+                    return state
+                # 继续执行下面的循环逻辑，使用 new_plan
                 next_plan = verify.new_plan
-                plan_event = "new_plan_adopted"
+                plan_event = "supplement_plan_adopted"
                 plan_label = "new_plan"
-            else:
-                state.fsm_state = "FAILED"
-                self._emit(
-                    on_event, "failed", {"reason": f"未知裁决: {verify.verdict}"}, state=state,
-                )
-                return state
+                # 跳过下面的 NEEDS_REVIEW/DO_NOT_SHIP/INCOMPLETE 分支，直接进入循环续接
+                _skip_verdict_branching = True
 
-            if next_plan is None:
-                state.fsm_state = "FAILED"
-                self._emit(
-                    on_event,
-                    "failed",
-                    {"reason": f"{verify.verdict.value} 但 Verify 未输出 {plan_label}"},
-                    state=state,
-                )
-                return state
-
-            # 自动模式：直接继续；手动模式：等待用户决策
-            if loop_mode == "auto":
-                decision = "continue"
-            else:
+            elif verify.verdict == Verdict.NEEDS_REVIEW:
+                # 模棱两可 -> 始终交由人工决策
                 state.fsm_state = "AWAITING_USER"
                 self._emit(
                     on_event,
@@ -274,19 +277,100 @@ class Orchestrator:
                     state=state,
                 )
                 if decide is None:
+                    # 默认 continue（与现有行为一致）
                     decision = "continue"
                 else:
                     decision = decide(verify, state)
 
-            if decision != "continue":
-                state.fsm_state = "DONE"
-                self._emit(
-                    on_event,
-                    "done",
-                    {"reason": "user_ignore", "iterations": state.iteration},
-                    state=state,
+                if decision != "continue":
+                    state.fsm_state = "DONE"
+                    self._emit(
+                        on_event,
+                        "done",
+                        {"reason": "user_ignore", "iterations": state.iteration},
+                        state=state,
+                    )
+                    return state
+
+                # 用户选择继续 Loop -> 复用当前 Plan（重新执行 Act，携带 Verify issues 作为上下文）
+                next_plan = state.current_plan
+                # 将 verify issues 附加到 plan 的 reasoning 中，供 Act 阶段参考
+                issues_summary = "\n".join(
+                    f"- [{i.severity}] {i.file}: {i.failure_scenario}" for i in verify.issues
                 )
-                return state
+                next_plan.reasoning = (next_plan.reasoning or "") + (
+                    f"\n\n【上一轮 Verify 指出的问题（需修复）】\n{issues_summary}"
+                )
+                plan_event = "needs_review_continue"
+                plan_label = "same_plan"
+                _skip_verdict_branching = True
+
+            else:
+                _skip_verdict_branching = False
+
+            # DO_NOT_SHIP 或 INCOMPLETE -> 需要继续循环
+            if not _skip_verdict_branching:
+                if state.iteration >= state.max_iterations:
+                    state.fsm_state = "FAILED"
+                    self._emit(
+                        on_event,
+                        "failed",
+                        {"reason": f"达到最大迭代次数 {state.max_iterations}"},
+                        state=state,
+                    )
+                    return state
+
+                # 确定续接计划
+                if verify.verdict == Verdict.DO_NOT_SHIP:
+                    next_plan = verify.debug_plan
+                    plan_event = "debug_plan_adopted"
+                    plan_label = "debug_plan"
+                elif verify.verdict == Verdict.INCOMPLETE:
+                    next_plan = verify.new_plan
+                    plan_event = "new_plan_adopted"
+                    plan_label = "new_plan"
+                else:
+                    state.fsm_state = "FAILED"
+                    self._emit(
+                        on_event, "failed", {"reason": f"未知裁决: {verify.verdict}"}, state=state,
+                    )
+                    return state
+
+                if next_plan is None:
+                    state.fsm_state = "FAILED"
+                    self._emit(
+                        on_event,
+                        "failed",
+                        {"reason": f"{verify.verdict.value} 但 Verify 未输出 {plan_label}"},
+                        state=state,
+                    )
+                    return state
+
+                # 自动模式：直接继续；手动模式：等待用户决策
+                if loop_mode == "auto":
+                    decision = "continue"
+                else:
+                    state.fsm_state = "AWAITING_USER"
+                    self._emit(
+                        on_event,
+                        "awaiting_user",
+                        {"iteration": state.iteration, "verify": verify.model_dump(mode="json")},
+                        state=state,
+                    )
+                    if decide is None:
+                        decision = "continue"
+                    else:
+                        decision = decide(verify, state)
+
+                if decision != "continue":
+                    state.fsm_state = "DONE"
+                    self._emit(
+                        on_event,
+                        "done",
+                        {"reason": "user_ignore", "iterations": state.iteration},
+                        state=state,
+                    )
+                    return state
 
             # 采用续接计划，继续循环
             next_plan.plan_id = uuid.uuid4().hex[:8]
@@ -306,10 +390,13 @@ class Orchestrator:
     # -----------------------------------------------------------------
     def _run_plan(self, state: SessionState) -> Plan:
         s = pavp_settings.load()
+        _plan_cfg = pavp_settings.get_plan_config(s)
         _write_state_file(state)  # 刷新时间戳，防止 UI 超时显示 Standby
+        # 后台线程定期刷新状态文件，防止长时间 LLM 调用导致 UI 超时显示 Standby
+        _plan_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
-                s["plan_model"], s["plan_api"], s["plan_base_url"],
+                _plan_cfg["model"], _plan_cfg["openai_api"], _plan_cfg["openai_base_url"],
                 [
                     {"role": "system", "content": PLAN_SYSTEM},
                     {"role": "user", "content": build_plan_user_prompt(state.original_requirement, self.project_root)},
@@ -319,6 +406,8 @@ class Orchestrator:
             )
         except httpx.HTTPError as e:
             raise LLMError(str(e))
+        finally:
+            _plan_stop.set()
         data = _parse_json(raw)
         return Plan(
             plan_id=uuid.uuid4().hex[:8],
@@ -338,10 +427,12 @@ class Orchestrator:
         instead of a structured plan.
         """
         s = pavp_settings.load()
+        _plan_cfg = pavp_settings.get_plan_config(s)
         _write_state_file(state)  # 刷新时间戳，防止 UI 超时显示 Standby
+        _answer_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
-                s["plan_model"], s["plan_api"], s["plan_base_url"],
+                _plan_cfg["model"], _plan_cfg["openai_api"], _plan_cfg["openai_base_url"],
                 [
                     {"role": "system", "content": _ANSWER_SYSTEM},
                     {"role": "user", "content": state.original_requirement},
@@ -351,15 +442,20 @@ class Orchestrator:
             )
         except httpx.HTTPError as e:
             raise LLMError(str(e))
+        finally:
+            _answer_stop.set()
         data = _parse_json(raw)
         return data.get("answer", "")
 
     def _run_verify(self, state: SessionState) -> VerifyResult:
         s = pavp_settings.load()
+        _plan_cfg = pavp_settings.get_plan_config(s)
         _write_state_file(state)  # 刷新时间戳，防止 UI 超时显示 Standby
+        # 后台线程定期刷新状态文件，防止长时间 LLM 调用导致 UI 超时显示 Standby
+        _verify_stop = _start_verify_state_updater(state)
         try:
             raw = _call_llm_text(
-                s["plan_model"], s["plan_api"], s["plan_base_url"],
+                _plan_cfg["model"], _plan_cfg["openai_api"], _plan_cfg["openai_base_url"],
                 [
                     {"role": "system", "content": VERIFY_SYSTEM},
                     {"role": "user", "content": build_verify_user_prompt(
@@ -373,11 +469,17 @@ class Orchestrator:
             )
         except httpx.HTTPError as e:
             raise LLMError(str(e))
+        finally:
+            _verify_stop.set()
         data = _parse_json(raw)
         # 规范化 verdict
         v = str(data.get("verdict", "")).upper().replace("_", "-").replace(" ", "-")
-        if v not in ("PASS", "SHIP-WITH-FIXES", "DO-NOT-SHIP", "INCOMPLETE"):
+        if v not in ("PASS", "SHIP-WITH-FIXES", "DO-NOT-SHIP", "INCOMPLETE", "NEEDS-REVIEW"):
             v = "DO-NOT-SHIP"
+        # needs_loop 解析（宽松 Loop 条件）
+        needs_loop = data.get("needs_loop", False)
+        if not isinstance(needs_loop, bool):
+            needs_loop = False
         # debug_plan 解析
         debug_plan = None
         dp_data = data.get("debug_plan")
@@ -412,6 +514,7 @@ class Orchestrator:
             ],
             debug_plan=debug_plan,
             new_plan=new_plan,
+            needs_loop=needs_loop,
         )
 
     # -----------------------------------------------------------------
