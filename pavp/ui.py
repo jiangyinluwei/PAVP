@@ -172,6 +172,37 @@ def _is_proxy_running(port: int | None = None) -> tuple[bool, bool]:
         return False, False
 
 
+def _get_cached_proxy_status(port: int) -> tuple[bool, bool]:
+    """Get proxy status with session_state caching.
+
+    Cache TTL is 2 seconds to avoid blocking full page re-renders
+    with HTTP calls (health/info endpoints).  The independent
+    @st.fragment(run_every=2.0) keeps the cache refreshed so the
+    main script almost always finds a fresh entry.
+
+    When the cache is stale, a real check is performed and the
+    result is stored back.
+    """
+    now = time.time()
+    cache = st.session_state.get("_proxy_status_cache")
+    if cache is not None and cache.get("port") == port and (now - cache["timestamp"]) < 2.0:
+        return cache["alive"], cache["ready"]
+
+    alive, ready = _is_proxy_running(port)
+    st.session_state["_proxy_status_cache"] = {
+        "alive": alive,
+        "ready": ready,
+        "port": port,
+        "timestamp": now,
+    }
+    return alive, ready
+
+
+def _invalidate_proxy_status_cache():
+    """Force the next _get_cached_proxy_status() to perform a real check."""
+    st.session_state.pop("_proxy_status_cache", None)
+
+
 def _read_pid() -> int:
     try:
         return int(_PID_FILE.read_text().strip())
@@ -903,7 +934,7 @@ if "proxy_port" not in st.session_state:
     st.session_state.proxy_port = st.session_state.settings_cache.get("proxy_port", DEFAULT_PORT)
 
 # Check real proxy status (not session state)
-proxy_alive, proxy_ready = _is_proxy_running(st.session_state.proxy_port)
+proxy_alive, proxy_ready = _get_cached_proxy_status(st.session_state.proxy_port)
 
 # Auto-sync port: if the running proxy is on a different port than settings,
 # update settings.json and session state to match the actual port.
@@ -941,6 +972,7 @@ if _auto_start_val and not proxy_alive and not st.session_state.auto_start_attem
         _start_proxy(port)
         # Wait for proxy to become healthy (up to 10s) instead of fixed sleep
         _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+        _invalidate_proxy_status_cache()
         st.rerun()
 
 
@@ -1097,6 +1129,7 @@ if proxy_alive:
             _start_proxy(port)
             # Wait for proxy to become healthy (up to 10s)
             _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+            _invalidate_proxy_status_cache()
             st.rerun()
     else:
         col_stop, col_health = st.columns(2)
@@ -1105,6 +1138,7 @@ if proxy_alive:
             st.session_state.proxy_stop_time = time.time()
             # Wait for proxy to actually stop (up to 5s) instead of fixed sleep
             _wait_until(lambda: not _is_proxy_running(port)[0], timeout=5.0, interval=0.1)
+            _invalidate_proxy_status_cache()
             st.rerun()
     if col_health.button("🔍 Health", use_container_width=True):
         _run_health_check(port)
@@ -1120,6 +1154,7 @@ elif _has_error:
         _start_proxy(port)
         # Wait for proxy to become healthy (up to 10s) instead of fixed sleep
         _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+        _invalidate_proxy_status_cache()
         st.rerun()
     if col_health.button("🔍 Health", use_container_width=True):
         _run_health_check(port)
@@ -1134,6 +1169,7 @@ else:
         st.session_state.pop("proxy_stop_time", None)
         # Wait for proxy to become healthy (up to 10s) instead of fixed sleep
         _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+        _invalidate_proxy_status_cache()
         st.rerun()
     if col_health.button("🔍 Health", use_container_width=True):
         _run_health_check(port)
@@ -1143,7 +1179,7 @@ else:
 # ============================================================================
 # Status display
 # ============================================================================
-proxy_alive, proxy_ready = _is_proxy_running(port)
+proxy_alive, proxy_ready = _get_cached_proxy_status(port)
 
 # The status indicator (Plan/Act field) is auto-refreshed via the
 # @st.fragment(run_every=2.0) decorator on _render_status_fragment() above.
