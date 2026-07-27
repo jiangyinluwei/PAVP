@@ -12,7 +12,6 @@ The proxy never executes tools. All tool execution is by the agent.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import hashlib
 import json
 import os
@@ -52,9 +51,6 @@ _TASK_TIMEOUT = 600
 # Used to distinguish "pvap Act..." (first turn) from "pvap Continue..." (follow-up turns).
 _act_started: set[str] = set()
 
-# Thread lock for shared state (_plan_cache, _task_cache, _act_started)
-_cache_lock = threading.Lock()
-
 # 状态文件：供 Streamlit UI 实时读取当前 PAVP 代理状态
 _STATE_FILE = Path.home() / ".pavp" / "current_state.json"
 
@@ -76,10 +72,9 @@ def _update_proxy_state(fsm_state: str, iteration: int = 0, *, last_api_call: st
         "last_api_call": last_api_call or now,
     }
     # 添加 task_key 信息（总数 + 随机采样），供 UI 展示 &N TK-xxx#N State 格式
-    with _cache_lock:
-        if _task_cache:
-            data["task_key_count"] = len(_task_cache)
-            data["task_key_sample"] = random.choice(list(_task_cache.keys()))
+    if _task_cache:
+        data["task_key_count"] = len(_task_cache)
+        data["task_key_sample"] = random.choice(list(_task_cache.keys()))
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     _STATE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8-sig")
 
@@ -100,30 +95,6 @@ def _start_state_updater(fsm_state: str, iteration: int, interval: float = 15.0)
     t = threading.Thread(target=_update_loop, daemon=True)
     t.start()
     return stop_event
-
-
-# Event loop reference for cross-thread disconnect detection.
-# Set in create_app() when the app is initialized.
-_event_loop: asyncio.AbstractEventLoop | None = None
-
-
-def _is_client_disconnected(request: Request) -> bool:
-    """Check if the HTTP client has disconnected (sync-compatible).
-
-    Called from synchronous generators running in a thread pool.
-    Uses the stored event loop reference to schedule the async check.
-    Returns False if the check cannot be performed (no event loop, etc.).
-    """
-    global _event_loop
-    if _event_loop is None or _event_loop.is_closed():
-        return False
-    try:
-        future = asyncio.run_coroutine_threadsafe(
-            request.is_disconnected(), _event_loop
-        )
-        return future.result(timeout=0.5)
-    except (asyncio.TimeoutError, Exception):
-        return False
 
 
 # Markers indicating a message refers to earlier conversation context (anaphora).
@@ -221,24 +192,23 @@ def _cleanup_stale_tasks() -> None:
 
     Called on each request to prevent memory leak from abandoned tasks.
     """
-    with _cache_lock:
-        now = time.time()
-        stale_keys = [
-            tk for tk, info in _task_cache.items()
-            if now - info["last_used"] > _TASK_TIMEOUT
-        ]
-        if not stale_keys:
-            return
-        for tk in stale_keys:
-            del _task_cache[tk]
-            # Remove all _plan_cache entries with this task_key
-            stale_ckeys = [ck for ck, v in _plan_cache.items()
-                           if isinstance(v, dict) and v.get("task_key") == tk]
-            for ck in stale_ckeys:
-                compound = f"{tk}:{ck}"
-                _act_started.discard(compound)
-                del _plan_cache[ck]
-        print(f"[PAVP] Cleaned {len(stale_keys)} stale task(s), removed {len(stale_ckeys)} plan(s)", flush=True)
+    now = time.time()
+    stale_keys = [
+        tk for tk, info in _task_cache.items()
+        if now - info["last_used"] > _TASK_TIMEOUT
+    ]
+    if not stale_keys:
+        return
+    for tk in stale_keys:
+        del _task_cache[tk]
+        # Remove all _plan_cache entries with this task_key
+        stale_ckeys = [ck for ck, v in _plan_cache.items()
+                       if isinstance(v, dict) and v.get("task_key") == tk]
+        for ck in stale_ckeys:
+            compound = f"{tk}:{ck}"
+            _act_started.discard(compound)
+            del _plan_cache[ck]
+    print(f"[PAVP] Cleaned {len(stale_keys)} stale task(s), removed {len(stale_ckeys)} plan(s)", flush=True)
 
 
 def _extract_project_root(messages: list[dict]) -> str:
@@ -436,10 +406,6 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
     # 启动时重置状态文件，避免 UI 读取到残留的旧状态
     _update_proxy_state("IDLE")
 
-    # 保存事件循环引用，供跨线程断开连接检测使用
-    global _event_loop
-    _event_loop = asyncio.get_event_loop()
-
     @app.get("/health")
     async def health():
         return {"status": "ok", "service": "pavp-proxy"}
@@ -542,21 +508,17 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             # The Plan model generates a unique task_key for each new task.
             # task_key is used to isolate caches per task and to anchor
             # context across multiple turns of the same task.
-            with _cache_lock:
-                if ckey in _plan_cache:
-                    cached = _plan_cache[ckey]
-                    plan = cached["plan"]
-                    task_key = cached["task_key"]
-                    needs_act = plan_requires_act(plan)
-                    # Update last-used timestamp for this task
-                    if task_key in _task_cache:
-                        _task_cache[task_key]["last_used"] = time.time()
-                    _cache_hit = True
-                else:
-                    _cache_hit = False
-                    task_key = ""
-
-            if not _cache_hit:
+            if ckey in _plan_cache:
+                cached = _plan_cache[ckey]
+                plan = cached["plan"]
+                task_key = cached["task_key"]
+                needs_act = plan_requires_act(plan)
+                # Update last-used timestamp for this task
+                if task_key in _task_cache:
+                    _task_cache[task_key]["last_used"] = time.time()
+                print(f"[PAVP] Plan (cached, task_key={task_key}, turn {turn_count}): {plan[:100]}...", flush=True)
+                _update_proxy_state("ACTING", turn_count + 1)
+            else:
                 print(f"[PAVP] Planning (turn {turn_count}): {prompt[:60]}...", flush=True)
                 _update_proxy_state("PLANNING", turn_count + 1)
                 _plan_stop = _start_state_updater("PLANNING", turn_count + 1)
@@ -570,19 +532,15 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 if needs_act:
                     # Extract task_key from Plan model's JSON output
                     task_key = _extract_task_key(plan)
-                    with _cache_lock:
-                        # Ensure uniqueness: if the key somehow collides, generate a fallback
-                        if task_key in _task_cache:
-                            task_key = f"TK-{uuid.uuid4().hex[:8]}"
-                        _task_cache[task_key] = {"last_used": time.time()}
-                        _plan_cache[ckey] = {"plan": plan, "task_key": task_key}
+                    # Ensure uniqueness: if the key somehow collides, generate a fallback
+                    if task_key in _task_cache:
+                        task_key = f"TK-{uuid.uuid4().hex[:8]}"
+                    _task_cache[task_key] = {"last_used": time.time()}
+                    _plan_cache[ckey] = {"plan": plan, "task_key": task_key}
                 else:
                     # Plan-only (no Act): no task_key needed
                     task_key = ""
                 print(f"[PAVP] Plan done: task_key={task_key}, plan={plan[:120]}", flush=True)
-                _update_proxy_state("ACTING", turn_count + 1)
-            else:
-                print(f"[PAVP] Plan (cached, task_key={task_key}, turn {turn_count}): {plan[:100]}...", flush=True)
                 _update_proxy_state("ACTING", turn_count + 1)
 
             # Clean up stale tasks periodically
@@ -621,9 +579,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                             if debug_plan and isinstance(debug_plan, dict) and debug_plan.get("tasks"):
                                 # 验证失败 + 有有效 debug_plan → 更新 plan 继续 Act
                                 plan = json.dumps(debug_plan, ensure_ascii=False)
-                                with _cache_lock:
-                                    if ckey in _plan_cache:
-                                        _plan_cache[ckey]["plan"] = plan
+                                if ckey in _plan_cache:
+                                    _plan_cache[ckey]["plan"] = plan
                                 pavp_stage = build_pvap_stage("act", loop=turn_count)
                                 _update_proxy_state("ACTING", turn_count + 1)
                                 print(f"[PAVP] Verify FAILED: {verify_result.get('summary', '')}. "
@@ -649,8 +606,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     pavp_stage = build_pvap_stage("act", is_continue=True)
             else:
                 pavp_stage = build_pvap_stage("act")
-                with _cache_lock:
-                    _act_started.add(compound_key)
+                _act_started.add(compound_key)
 
             # ---- Plan-only (no Act needed): route to act model directly ----
             if not needs_act:
@@ -677,11 +633,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                         try:
                             for line in _call_stream(
                                 act_cfg["model"], act_api_key, act_base_url,
-                                messages, max_tokens=8192, timeout=180, extra=extra,
+                                messages, max_tokens=8192, timeout=600, extra=extra,
                             ):
-                                # Check if client disconnected
-                                if _is_client_disconnected(request):
-                                    return
                                 # Periodically refresh state to prevent UI timeout
                                 now = time.time()
                                 if now - last_state_update > 15:
@@ -718,7 +671,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 _qa_stop = _start_state_updater("ACTING", turn_count + 1)
                 try:
                     resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
-                                     messages, max_tokens=8192, timeout=180, extra=extra)
+                                     messages, max_tokens=8192, timeout=600, extra=extra)
                 finally:
                     _qa_stop.set()
                 msg = resp["choices"][0]["message"]
@@ -779,11 +732,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     try:
                         for line in _call_stream(
                             act_cfg["model"], act_api_key, act_base_url,
-                            act_messages, max_tokens=8192, timeout=180, extra=extra,
+                            act_messages, max_tokens=8192, timeout=600, extra=extra,
                         ):
-                            # Check if client disconnected
-                            if _is_client_disconnected(request):
-                                return
                             # Periodically refresh state to prevent UI timeout
                             now = time.time()
                             if now - last_state_update > 15:
@@ -826,19 +776,14 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 _act_stop = _start_state_updater("ACTING", turn_count + 1)
                 try:
                     resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
-                                     act_messages, max_tokens=8192, timeout=180, extra=extra)
+                                     act_messages, max_tokens=8192, timeout=600, extra=extra)
                 finally:
                     _act_stop.set()
                 msg = resp["choices"][0]["message"]
                 has_tool_calls = bool(msg.get("tool_calls"))
 
                 # 无 tool_calls + 非首次 Act 轮次 → 任务完成，运行 Verify
-                if not has_tool_calls and _act_try == 0:
-                    with _cache_lock:
-                        _is_act_started = compound_key in _act_started
-                    if not _is_act_started:
-                        pavp_stage = build_pvap_stage("act", is_finish=True)
-                        break
+                if not has_tool_calls and compound_key in _act_started and _act_try == 0:
                     if _has_file_changes(messages):
                         _update_proxy_state("VERIFYING", turn_count + 1)
                         _v_stop = _start_state_updater("VERIFYING", turn_count + 1)
@@ -854,9 +799,8 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                             dp = verify_result.get("debug_plan")
                             if dp and isinstance(dp, dict) and dp.get("tasks"):
                                 plan = json.dumps(dp, ensure_ascii=False)
-                                with _cache_lock:
-                                    if ckey in _plan_cache:
-                                        _plan_cache[ckey]["plan"] = plan
+                                if ckey in _plan_cache:
+                                    _plan_cache[ckey]["plan"] = plan
                                 act_messages = _build_act_messages(messages, plan)
                                 pavp_stage = build_pvap_stage("act", loop=turn_count)
                                 _update_proxy_state("ACTING", turn_count + 1)
@@ -868,9 +812,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     # Verify PASSED or no file changes
                     pavp_stage = build_pvap_stage("act", is_finish=True)
                 elif has_tool_calls:
-                    with _cache_lock:
-                        _is_act_started = compound_key in _act_started
-                    pavp_stage = build_pvap_stage("act", is_continue=True) if _is_act_started else build_pvap_stage("act")
+                    pavp_stage = build_pvap_stage("act", is_continue=True) if compound_key in _act_started else build_pvap_stage("act")
 
                 break  # Normal exit
 
@@ -1024,7 +966,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 non_stream_body = dict(openai_body)
                 non_stream_body["stream"] = False
                 try:
-                    async with httpx.AsyncClient(timeout=180) as client:
+                    async with httpx.AsyncClient(timeout=600) as client:
                         openai_resp = await client.post(
                             openai_url,
                             headers={"Authorization": f"Bearer {internal_key}"},
@@ -1091,7 +1033,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
         # ---- Non-streaming ----
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(timeout=600) as client:
                 openai_resp = await client.post(
                     openai_url,
                     headers={"Authorization": f"Bearer {internal_key}"},
