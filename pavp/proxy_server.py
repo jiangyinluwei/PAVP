@@ -633,7 +633,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                         try:
                             for line in _call_stream(
                                 act_cfg["model"], act_api_key, act_base_url,
-                                messages, max_tokens=8192, timeout=600, extra=extra,
+                                messages, max_tokens=8192, timeout=180, extra=extra,
                             ):
                                 # Periodically refresh state to prevent UI timeout
                                 now = time.time()
@@ -671,7 +671,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 _qa_stop = _start_state_updater("ACTING", turn_count + 1)
                 try:
                     resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
-                                     messages, max_tokens=8192, timeout=600, extra=extra)
+                                     messages, max_tokens=8192, timeout=180, extra=extra)
                 finally:
                     _qa_stop.set()
                 msg = resp["choices"][0]["message"]
@@ -732,7 +732,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     try:
                         for line in _call_stream(
                             act_cfg["model"], act_api_key, act_base_url,
-                            act_messages, max_tokens=8192, timeout=600, extra=extra,
+                            act_messages, max_tokens=8192, timeout=180, extra=extra,
                         ):
                             # Periodically refresh state to prevent UI timeout
                             now = time.time()
@@ -776,7 +776,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 _act_stop = _start_state_updater("ACTING", turn_count + 1)
                 try:
                     resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
-                                     act_messages, max_tokens=8192, timeout=600, extra=extra)
+                                     act_messages, max_tokens=8192, timeout=180, extra=extra)
                 finally:
                     _act_stop.set()
                 msg = resp["choices"][0]["message"]
@@ -966,7 +966,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 non_stream_body = dict(openai_body)
                 non_stream_body["stream"] = False
                 try:
-                    async with httpx.AsyncClient(timeout=600) as client:
+                    async with httpx.AsyncClient(timeout=180) as client:
                         openai_resp = await client.post(
                             openai_url,
                             headers={"Authorization": f"Bearer {internal_key}"},
@@ -1033,7 +1033,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
         # ---- Non-streaming ----
         try:
-            async with httpx.AsyncClient(timeout=600) as client:
+            async with httpx.AsyncClient(timeout=180) as client:
                 openai_resp = await client.post(
                     openai_url,
                     headers={"Authorization": f"Bearer {internal_key}"},

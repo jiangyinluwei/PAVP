@@ -132,7 +132,7 @@ def _call_llm_raw(
     model: str, api_key: str, base_url: str,
     messages: list[dict],
     *, temperature: float = 0.2, max_tokens: int = 4096,
-    timeout: float = 300.0,
+    timeout: float = 180.0,
     extra: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Call an OpenAI-compatible LLM API and return full response dict.
@@ -163,7 +163,7 @@ def _call_llm_stream(
     model: str, api_key: str, base_url: str,
     messages: list[dict],
     *, temperature: float = 0.2, max_tokens: int = 4096,
-    timeout: float = 600.0,
+    timeout: float = 180.0,
     extra: Optional[dict[str, Any]] = None,
     max_retries: int = 5,
     base_delay: float = 2.0,
@@ -214,7 +214,7 @@ def _call_llm_text(
     model: str, api_key: str, base_url: str,
     messages: list[dict],
     *, temperature: float = 0.2, max_tokens: int = 4096,
-    timeout: float = 300.0,
+    timeout: float = 180.0,
 ) -> str:
     """Call an OpenAI-compatible LLM API with json_object response format."""
     url = f"{base_url.rstrip('/')}/chat/completions"
@@ -355,7 +355,7 @@ def _call_anthropic_raw(
     model: str, api_key: str, base_url: str,
     messages: list[dict],
     *, temperature: float = 0.2, max_tokens: int = 4096,
-    timeout: float = 300.0,
+    timeout: float = 180.0,
     extra: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Call Anthropic API (non-streaming) and return OpenAI-compatible dict."""
@@ -399,7 +399,7 @@ def _call_anthropic_stream(
     model: str, api_key: str, base_url: str,
     messages: list[dict],
     *, temperature: float = 0.2, max_tokens: int = 4096,
-    timeout: float = 600.0,
+    timeout: float = 180.0,
     extra: Optional[dict[str, Any]] = None,
     max_retries: int = 5,
     base_delay: float = 2.0,
@@ -461,7 +461,7 @@ def _call_anthropic_text(
     model: str, api_key: str, base_url: str,
     messages: list[dict],
     *, temperature: float = 0.2, max_tokens: int = 4096,
-    timeout: float = 300.0,
+    timeout: float = 180.0,
 ) -> str:
     """Call Anthropic API and return the text content.
 
