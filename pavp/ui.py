@@ -530,7 +530,7 @@ hr {
     margin: 0.5rem 0 !important;
 }
 .element-container {
-    margin-bottom: 0.3rem !important;
+    margin-bottom: 0.25rem !important;
 }
 
 /* Replace default "Running" indicator with rotating dots */
