@@ -241,6 +241,11 @@ def _start_proxy(port: int):
     # Stop old proxy by PID if one is running
     old_pid = _read_pid()
     if old_pid:
+        # Safety check: if the old proxy is still healthy, don't kill it.
+        # This prevents killing a running proxy due to a false-negative
+        # health check (e.g. during rapid Streamlit UI refresh).
+        if _pid_alive(old_pid) and _proxy_health(port):
+            return
         try:
             if sys.platform == "win32":
                 subprocess.run(["taskkill", "/PID", str(old_pid), "/F", "/T"],
@@ -969,11 +974,20 @@ if _auto_start_val and not proxy_alive and not st.session_state.auto_start_attem
     if _proxy_health(port):
         pass  # Proxy is already running, nothing to do
     else:
-        _start_proxy(port)
-        # Wait for proxy to become healthy (up to 10s) instead of fixed sleep
-        _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
-        _invalidate_proxy_status_cache()
-        st.rerun()
+        # Retry health check with short delay to avoid false negatives
+        # (e.g. during rapid UI refresh when the proxy is briefly busy).
+        _healthy = False
+        for _ in range(3):
+            time.sleep(0.3)
+            if _proxy_health(port):
+                _healthy = True
+                break
+        if not _healthy:
+            _start_proxy(port)
+            # Wait for proxy to become healthy (up to 10s) instead of fixed sleep
+            _wait_until(lambda: _proxy_health(port), timeout=10.0, interval=0.3)
+            _invalidate_proxy_status_cache()
+            st.rerun()
 
 
 def _refresh_settings():
