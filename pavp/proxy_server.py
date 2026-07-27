@@ -258,7 +258,14 @@ def _is_finish_turn(messages: list[dict]) -> bool:
     When the proxy's previous response had no tool_calls, the act model has
     finished executing the plan, and the current request is a follow-up turn
     that should be tagged as "pvap Finish".
+
+    If the last message is a user message, this is a new request (continuation
+    or new task), not a finish notification from the assistant. Return False
+    to prevent the Verify flow from being triggered prematurely.
     """
+    # If the last message is a user message, this is a new request, not a finish
+    if messages and messages[-1].get("role") == "user":
+        return False
     for msg in reversed(messages):
         if msg.get("role") == "assistant":
             return not bool(msg.get("tool_calls"))
