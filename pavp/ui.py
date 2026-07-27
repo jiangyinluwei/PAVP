@@ -1199,13 +1199,11 @@ elif "proxy_stop_time" in st.session_state:
 if proxy_alive:
     if proxy_ready:
         st.success("🟢 Running — Proxy API Ready")
-        api_key = s.get("litellm_master_key", "sk-pavp-local")
         proxy_url_no_v1 = proxy_url.removesuffix("/v1")
         plan_provider = _guess_provider(proxy_url, plan_model)
         act_provider = _guess_provider(proxy_url_no_v1, act_model)
         st.code(
             f"base_url = \"{proxy_url}\"({plan_provider}) / \"{proxy_url_no_v1}\"({act_provider})\n"
-            f"api_key  = \"{api_key}\"\n"
             f"model    = \"pavp\"",
             language="python",
         )

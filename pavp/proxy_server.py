@@ -833,7 +833,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             import traceback
             print(f"[PAVP] Error: {e}\n{traceback.format_exc()}", flush=True)
             _update_proxy_state("IDLE")
-            return JSONResponse(status_code=500, content={"error": {"message": str(e)}})
+            return JSONResponse(status_code=500, content={"error": {"message": "Internal proxy error"}})
 
     # =====================================================================
     # Anthropic Messages API (Claude Code compatible)
@@ -1038,7 +1038,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             print(f"[PAVP] Anthropic forward error: {e}", flush=True)
             return JSONResponse(
                 status_code=502,
-                content={"type": "error", "error": {"type": "api_error", "message": str(e)}},
+                content={"type": "error", "error": {"type": "api_error", "message": "Internal proxy error"}},
             )
 
         # ---- Convert OpenAI response to Anthropic format ----
