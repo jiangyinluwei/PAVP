@@ -16,9 +16,9 @@
 
 PAVP 本质上是一个 **LLM 编排层**，通过本地代理服务实现：
 
-- **Plan**：用高能力模型（如 GLM-5.2）分析需求，输出结构化计划
-- **Act**：用执行模型（如 DeepSeek V4 Flash）根据计划生成代码，通过 Claude Code 写入文件
-- **Verify**：用高能力模型审计代码改动，输出 PASS / DO-NOT-SHIP（含 DebugPlan）/ INCOMPLETE（含 NewPlan）
+- **Plan**：用高能力模型分析需求，输出结构化计划
+- **Act**：用执行模型根据计划生成代码，通过 Claude Code 写入文件
+- **Verify**：用高能力模型审计代码改动，输出 PASS / SHIP-WITH-FIXES / DO-NOT-SHIP（含 DebugPlan）/ INCOMPLETE（含 NewPlan）/ NEEDS-REVIEW
 - **Loop**：失败时自动或手动循环，直到通过或达到最大迭代次数
 
 每个新任务会生成唯一 `task_key`（如 `TK-a1b2c3d4`），Plan 模型输出到 JSON 中，用于跨轮次锚定上下文、缓存隔离和状态追踪。
@@ -83,9 +83,9 @@ PAVP 从 Agent 视角看只是一个模型端点（`model="pavp"`），本质上
 
 PAVP is essentially an **LLM orchestration layer** implemented as a local proxy:
 
-- **Plan**: A high-capability model (e.g., GLM-5.2) analyzes requirements and outputs a structured plan
-- **Act**: An execution model (e.g., DeepSeek V4 Flash) generates code following the plan, written to files via Claude Code
-- **Verify**: The high-capability model audits the code changes, outputting PASS / DO-NOT-SHIP (with DebugPlan) / INCOMPLETE (with NewPlan)
+- **Plan**: A high-capability model analyzes requirements and outputs a structured plan
+- **Act**: An execution model generates code following the plan, written to files via Claude Code
+- **Verify**: The high-capability model audits the code changes, outputting PASS / SHIP-WITH-FIXES / DO-NOT-SHIP (with DebugPlan) / INCOMPLETE (with NewPlan) / NEEDS-REVIEW
 - **Loop**: On failure, loops automatically or manually until passing or reaching max iterations
 
 Each new task generates a unique `task_key` (e.g. `TK-a1b2c3d4`) in the Plan JSON, used for cross-turn context anchoring, cache isolation, and state tracking.
@@ -144,19 +144,24 @@ From the agent's perspective, PAVP is just a single model endpoint (`model="pavp
 
 ---
 
-## Quick Start
+## 项目结构
 
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Edit ~/.pavp/settings.json with your API keys
-
-# 3. Run the proxy server
-python -m pavp.proxy_server
-
-# 4. Or run the Streamlit UI (via run.ps1 or directly)
-streamlit run pavp/ui.py
+```
+PAVP/
+├── pavp/
+│   ├── __init__.py          # 包初始化，版本号
+│   ├── proxy_server.py      # FastAPI 代理（Plan → Act）
+│   ├── orchestrator.py      # 状态机（Plan → Act → Verify → Loop）
+│   ├── engine.py            # LLM 调用工具
+│   ├── act_executor.py      # Claude Code 子进程执行器
+│   ├── prompts.py           # 各阶段提示词模板
+│   ├── models.py            # Pydantic 数据模型
+│   ├── settings.py          # 设置加载器（~/.pavp/settings.json）
+│   ├── ui.py                # Streamlit 控制面板
+│   └── auto_start.py        # Windows 注册表自启动
+├── run.ps1                  # PowerShell 启动脚本
+├── requirements.txt
+└── README.md
 ```
 
 ## Project Structure
@@ -172,12 +177,15 @@ PAVP/
 │   ├── prompts.py           # Prompt templates for all phases
 │   ├── models.py            # Pydantic data models
 │   ├── settings.py          # Settings loader (~/.pavp/settings.json)
-│   ├── storage.py           # SQLite session persistence
 │   ├── ui.py                # Streamlit control panel
 │   └── auto_start.py        # Windows Registry auto-start
 ├── run.ps1                  # PowerShell launcher
 ├── requirements.txt
 └── README.md
 ```
+
+## License
+
+Apache 2.0
 
 

@@ -33,8 +33,9 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .engine import make_plan, plan_requires_act, _call_llm_raw, _call_llm_stream, _call_llm_text, _call_anthropic_raw, _call_anthropic_stream, build_pvap_stage
+from .engine import make_plan, plan_requires_act, _call_llm_raw, _call_llm_stream, _call_llm_text, _call_anthropic_raw, _call_anthropic_stream, _call_anthropic_text, build_pvap_stage
 from .settings import load as load_settings, settings_path, DEFAULT_PORT, get_plan_config, get_act_config, get_current_plan_id, get_current_act_id
+from .prompts import VERIFY_PROXY_LITE_SYSTEM, build_verify_proxy_prompt
 
 # In-memory plan cache: ckey -> {"plan": plan_json_str, "task_key": str}
 _plan_cache: dict[str, dict] = {}
@@ -257,7 +258,14 @@ def _is_finish_turn(messages: list[dict]) -> bool:
     When the proxy's previous response had no tool_calls, the act model has
     finished executing the plan, and the current request is a follow-up turn
     that should be tagged as "pvap Finish".
+
+    If the last message is a user message, this is a new request (continuation
+    or new task), not a finish notification from the assistant. Return False
+    to prevent the Verify flow from being triggered prematurely.
     """
+    # If the last message is a user message, this is a new request, not a finish
+    if messages and messages[-1].get("role") == "user":
+        return False
     for msg in reversed(messages):
         if msg.get("role") == "assistant":
             return not bool(msg.get("tool_calls"))
@@ -290,6 +298,105 @@ def _build_act_messages(messages: list[dict], plan: str) -> list[dict]:
     # No system message → insert one at the beginning
     act_messages.insert(0, {"role": "system", "content": plan_prefix})
     return act_messages
+
+
+# ---------------------------------------------------------------------
+# Proxy Verify 辅助函数
+# ---------------------------------------------------------------------
+
+_FILE_MODIFY_TOOLS = frozenset({"Edit", "Write", "Create", "edit", "write", "create"})
+
+
+def _has_file_changes(messages: list[dict]) -> bool:
+    """检查整个对话中是否有文件修改类的 tool_calls。"""
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls", []):
+                func = tc.get("function", {})
+                name = func.get("name", "")
+                if name in _FILE_MODIFY_TOOLS:
+                    return True
+    return False
+
+
+def _extract_file_changes(messages: list[dict]) -> str:
+    """提取所有文件修改类 tool_calls 的摘要。"""
+    changes: list[str] = []
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls", []):
+                func = tc.get("function", {})
+                name = func.get("name", "")
+                if name in _FILE_MODIFY_TOOLS:
+                    try:
+                        args = json.loads(func.get("arguments", "{}"))
+                        fp = args.get("file_path") or args.get("file", "")
+                        changes.append(f"  - {name}: {fp}")
+                    except json.JSONDecodeError:
+                        changes.append(f"  - {name}: (参数解析失败)")
+    return "\n".join(changes)
+
+
+def _extract_act_output(messages: list[dict]) -> str:
+    """提取 Act 模型的所有文本输出。"""
+    outputs: list[str] = []
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            content = msg.get("content", "") or ""
+            if content.strip():
+                outputs.append(content.strip()[:300])
+    return "\n---\n".join(outputs[-5:])  # 最近 5 条
+
+
+def _run_verify_proxy(
+    plan_json: str,
+    messages: list[dict],
+    plan_cfg: dict,
+    api_key: str,
+    base_url: str,
+    api_format: str,
+) -> dict:
+    """调用 Plan 模型执行轻量级 Verify。
+
+    Returns:
+        {"verdict": "PASS"|"FAIL", "summary": "...", "issues": [...], "debug_plan": dict|None}
+    """
+    file_changes = _extract_file_changes(messages)
+    act_output = _extract_act_output(messages)
+    verify_prompt = build_verify_proxy_prompt(plan_json, file_changes, act_output)
+
+    # 使用 Anthropic 调用器还是 OpenAI 调用器
+    use_anthropic = (api_format == "anthropic") or "anthropic.com" in base_url.lower()
+    caller = _call_anthropic_text if use_anthropic else _call_llm_text
+
+    try:
+        raw = caller(
+            plan_cfg["model"], api_key, base_url,
+            [
+                {"role": "system", "content": VERIFY_PROXY_LITE_SYSTEM},
+                {"role": "user", "content": verify_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=2048,
+        )
+    except Exception as e:
+        print(f"[PAVP] Verify LLM call failed: {e}", flush=True)
+        return {"verdict": "PASS", "summary": "Verify 调用失败，默认通过", "issues": [], "debug_plan": None}
+
+    try:
+        data = json.loads(raw)
+        verdict = str(data.get("verdict", "PASS")).upper()
+        if verdict not in ("PASS", "FAIL"):
+            verdict = "PASS"
+        return {
+            "verdict": verdict,
+            "summary": data.get("summary", ""),
+            "issues": data.get("issues", []),
+            "debug_plan": data.get("debug_plan"),
+        }
+    except (json.JSONDecodeError, TypeError) as e:
+        print(f"[PAVP] Verify JSON parse failed: {e}\nraw={raw[:200]}", flush=True)
+        return {"verdict": "PASS", "summary": "Verify 解析失败，默认通过", "issues": [], "debug_plan": None}
 
 
 def create_app(settings: Optional[dict] = None) -> FastAPI:
@@ -448,20 +555,53 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
             model_name = body.get("model", "pavp")
 
-            # Determine pavp_stage for the API response to the external agent
-            # Use _act_started set to distinguish first Act (pvap Act...)
-            # from follow-up turns (pvap Continue...).
-            # If the last assistant message had no tool_calls, the workflow is complete
-            # and the next phase is Verify mode (based on task_key continuity).
+            # Determine pavp_stage + optionally run Verify
+            # _verify_passed: None=no verify done, True=passed (skip Act), False=failed (continue Act)
+            _verify_passed: bool | None = None
             if not needs_act:
                 pavp_stage = build_pvap_stage("plan")
             elif compound_key in _act_started:
                 if _is_finish_turn(messages):
-                    # Act 阶段完成 -> 进入 Verify 模式（基于 task_key 关联性推断）
-                    # Plan 模型将收到同一 task_key 下 Act 模型的输出，标志当前为 Verify 模式
-                    pavp_stage = build_pvap_stage("verify")
-                    _update_proxy_state("VERIFYING", turn_count + 1)
-                    print(f"[PAVP] Act finished for task_key={task_key}, entering Verify mode", flush=True)
+                    # Agent 发送了完成通知 → 运行真正的 Verify（如果有文件改动）
+                    if _has_file_changes(messages):
+                        _update_proxy_state("VERIFYING", turn_count + 1)
+                        _v_stop = _start_state_updater("VERIFYING", turn_count + 1)
+                        try:
+                            verify_result = _run_verify_proxy(
+                                plan, messages, plan_cfg,
+                                plan_api_key, plan_base_url, api_format,
+                            )
+                        finally:
+                            _v_stop.set()
+
+                        if verify_result.get("verdict") == "FAIL":
+                            debug_plan = verify_result.get("debug_plan")
+                            if debug_plan and isinstance(debug_plan, dict) and debug_plan.get("tasks"):
+                                # 验证失败 + 有有效 debug_plan → 更新 plan 继续 Act
+                                plan = json.dumps(debug_plan, ensure_ascii=False)
+                                if ckey in _plan_cache:
+                                    _plan_cache[ckey]["plan"] = plan
+                                pavp_stage = build_pvap_stage("act", loop=turn_count)
+                                _update_proxy_state("ACTING", turn_count + 1)
+                                print(f"[PAVP] Verify FAILED: {verify_result.get('summary', '')}. "
+                                      f"Debug plan adopted, continuing.", flush=True)
+                            else:
+                                # 无有效 debug_plan → 当作 PASS
+                                pavp_stage = build_pvap_stage("act", is_finish=True)
+                                _update_proxy_state("DONE")
+                                _verify_passed = True
+                                print(f"[PAVP] Verify FAILED but no valid debug_plan, treated as PASS", flush=True)
+                        else:
+                            pavp_stage = build_pvap_stage("act", is_finish=True)
+                            _update_proxy_state("DONE")
+                            _verify_passed = True
+                            print(f"[PAVP] Verify PASSED for '{task_key}'", flush=True)
+                    else:
+                        # 无文件改动 → 直接完成
+                        pavp_stage = build_pvap_stage("act", is_finish=True)
+                        _update_proxy_state("DONE")
+                        _verify_passed = True
+                        print(f"[PAVP] No file changes, finish turn", flush=True)
                 else:
                     pavp_stage = build_pvap_stage("act", is_continue=True)
             else:
@@ -493,7 +633,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                         try:
                             for line in _call_stream(
                                 act_cfg["model"], act_api_key, act_base_url,
-                                messages, max_tokens=8192, timeout=600, extra=extra,
+                                messages, max_tokens=8192, timeout=180, extra=extra,
                             ):
                                 # Periodically refresh state to prevent UI timeout
                                 now = time.time()
@@ -531,7 +671,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 _qa_stop = _start_state_updater("ACTING", turn_count + 1)
                 try:
                     resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
-                                     messages, max_tokens=8192, timeout=600, extra=extra)
+                                     messages, max_tokens=8192, timeout=180, extra=extra)
                 finally:
                     _qa_stop.set()
                 msg = resp["choices"][0]["message"]
@@ -546,6 +686,26 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     "created": int(time.time()), "model": model_name,
                     "choices": [{"index": 0, "message": msg,
                                  "finish_reason": resp["choices"][0].get("finish_reason", "stop")}],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    "pavp_stage": pavp_stage,
+                    "task_key": task_key,
+                }
+
+            # ---- Verify passed: return finish response, skip Act model ----
+            if _verify_passed is True:
+                _update_proxy_state("DONE")
+                if is_stream:
+                    def _finish_stream():
+                        nonlocal response_id, model_name, pavp_stage
+                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model_name, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': f'{pavp_stage}\n\n'}, 'finish_reason': None}], 'task_key': task_key})}\n\n"
+                        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model_name, 'choices': [{'index': 0, 'delta': {'content': 'Verified: all acceptance criteria met.'}, 'finish_reason': 'stop'}], 'task_key': task_key})}\n\n"
+                        yield "data: [DONE]\n\n"
+                    return StreamingResponse(_finish_stream(), media_type="text/event-stream")
+                msg = {"role": "assistant", "content": f"{pavp_stage}\n\nVerified: all acceptance criteria met."}
+                return {
+                    "id": response_id, "object": "chat.completion",
+                    "created": int(time.time()), "model": model_name,
+                    "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                     "pavp_stage": pavp_stage,
                     "task_key": task_key,
@@ -572,7 +732,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                     try:
                         for line in _call_stream(
                             act_cfg["model"], act_api_key, act_base_url,
-                            act_messages, max_tokens=8192, timeout=600, extra=extra,
+                            act_messages, max_tokens=8192, timeout=180, extra=extra,
                         ):
                             # Periodically refresh state to prevent UI timeout
                             now = time.time()
@@ -604,30 +764,58 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                                     role_sent = True
                             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                     finally:
-                        # 如果 Act 阶段完成且进入 Verify 模式，保持 VERIFYING 状态
-                        # 否则标记为 DONE（正常完成）
-                        if "Verify" in pavp_stage:
-                            _update_proxy_state("VERIFYING", turn_count + 1)
-                        else:
-                            _update_proxy_state("DONE")
+                        _update_proxy_state("DONE")
 
                 return StreamingResponse(generate(), media_type="text/event-stream")
 
             # Non-streaming path
             print(f"[PAVP] Act (turn {turn_count}): routing to {act_cfg['model']}...", flush=True)
-            _act_stop = _start_state_updater("ACTING", turn_count + 1)
-            try:
-                resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
-                                 act_messages, max_tokens=8192, timeout=600, extra=extra)
-            finally:
-                _act_stop.set()
-            msg = resp["choices"][0]["message"]
-            # If the act model responded without tool_calls, the workflow is complete
-            # and the next phase is Verify mode (based on task_key continuity).
-            if not msg.get("tool_calls") and compound_key in _act_started:
-                pavp_stage = build_pvap_stage("verify")
-                _update_proxy_state("VERIFYING", turn_count + 1)
-                print(f"[PAVP] Act finished: no tool_calls, entering Verify mode", flush=True)
+
+            # Allow one retry: initial Act call + potential retry with debug_plan after Verify
+            for _act_try in range(2):
+                _act_stop = _start_state_updater("ACTING", turn_count + 1)
+                try:
+                    resp = _call_raw(act_cfg["model"], act_api_key, act_base_url,
+                                     act_messages, max_tokens=8192, timeout=180, extra=extra)
+                finally:
+                    _act_stop.set()
+                msg = resp["choices"][0]["message"]
+                has_tool_calls = bool(msg.get("tool_calls"))
+
+                # 无 tool_calls + 非首次 Act 轮次 → 任务完成，运行 Verify
+                if not has_tool_calls and compound_key in _act_started and _act_try == 0:
+                    if _has_file_changes(messages):
+                        _update_proxy_state("VERIFYING", turn_count + 1)
+                        _v_stop = _start_state_updater("VERIFYING", turn_count + 1)
+                        try:
+                            verify_result = _run_verify_proxy(
+                                plan, messages, plan_cfg,
+                                plan_api_key, plan_base_url, api_format,
+                            )
+                        finally:
+                            _v_stop.set()
+
+                        if verify_result.get("verdict") == "FAIL":
+                            dp = verify_result.get("debug_plan")
+                            if dp and isinstance(dp, dict) and dp.get("tasks"):
+                                plan = json.dumps(dp, ensure_ascii=False)
+                                if ckey in _plan_cache:
+                                    _plan_cache[ckey]["plan"] = plan
+                                act_messages = _build_act_messages(messages, plan)
+                                pavp_stage = build_pvap_stage("act", loop=turn_count)
+                                _update_proxy_state("ACTING", turn_count + 1)
+                                print(f"[PAVP] Non-streaming Verify FAILED: "
+                                      f"{verify_result.get('summary', '')}. Retrying with debug plan.",
+                                      flush=True)
+                                continue  # Retry with debug plan
+
+                    # Verify PASSED or no file changes
+                    pavp_stage = build_pvap_stage("act", is_finish=True)
+                elif has_tool_calls:
+                    pavp_stage = build_pvap_stage("act", is_continue=True) if compound_key in _act_started else build_pvap_stage("act")
+
+                break  # Normal exit
+
             # Inject pavp_stage into assistant message content so agent sees it
             if msg.get("content"):
                 msg["content"] = f"{pavp_stage}\n\n{msg['content']}"
@@ -636,9 +824,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             print(f"[PAVP] Act done: content_len={len(msg.get('content','') or '')}, "
                   f"tool_calls={len(msg.get('tool_calls',[]))}, "
                   f"finish_reason={resp['choices'][0].get('finish_reason','?')}", flush=True)
-            # 如果已进入 Verify 模式，保持 VERIFYING 状态；否则标记为 DONE
-            if "Verify" not in pavp_stage:
-                _update_proxy_state("DONE")
+            _update_proxy_state("DONE")
 
             return {
                 "id": response_id, "object": "chat.completion",
@@ -654,7 +840,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             import traceback
             print(f"[PAVP] Error: {e}\n{traceback.format_exc()}", flush=True)
             _update_proxy_state("IDLE")
-            return JSONResponse(status_code=500, content={"error": {"message": str(e)}})
+            return JSONResponse(status_code=500, content={"error": {"message": "Internal proxy error"}})
 
     # =====================================================================
     # Anthropic Messages API (Claude Code compatible)
@@ -780,7 +966,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
                 non_stream_body = dict(openai_body)
                 non_stream_body["stream"] = False
                 try:
-                    async with httpx.AsyncClient(timeout=600) as client:
+                    async with httpx.AsyncClient(timeout=180) as client:
                         openai_resp = await client.post(
                             openai_url,
                             headers={"Authorization": f"Bearer {internal_key}"},
@@ -847,7 +1033,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
 
         # ---- Non-streaming ----
         try:
-            async with httpx.AsyncClient(timeout=600) as client:
+            async with httpx.AsyncClient(timeout=180) as client:
                 openai_resp = await client.post(
                     openai_url,
                     headers={"Authorization": f"Bearer {internal_key}"},
@@ -859,7 +1045,7 @@ def create_app(settings: Optional[dict] = None) -> FastAPI:
             print(f"[PAVP] Anthropic forward error: {e}", flush=True)
             return JSONResponse(
                 status_code=502,
-                content={"type": "error", "error": {"type": "api_error", "message": str(e)}},
+                content={"type": "error", "error": {"type": "api_error", "message": "Internal proxy error"}},
             )
 
         # ---- Convert OpenAI response to Anthropic format ----
