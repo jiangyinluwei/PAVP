@@ -17,7 +17,7 @@
 PAVP 本质上是一个 **LLM 编排层**，通过本地代理服务实现：
 
 - **Plan**：用高能力模型分析需求，输出结构化计划
-- **Act**：用执行模型根据计划生成代码，通过 Claude Code 写入文件
+- **Act**：用执行模型根据计划生成代码，通过智能体写入文件
 - **Verify**：用高能力模型审计代码改动，输出 PASS / SHIP-WITH-FIXES / DO-NOT-SHIP（含 DebugPlan）/ INCOMPLETE（含 NewPlan）/ NEEDS-REVIEW
 - **Loop**：失败时自动或手动循环，直到通过或达到最大迭代次数
 
@@ -59,7 +59,7 @@ model    = "pavp"
 
 - 当前在 **Trae** \ **Claude** 中使用，未测试其他 Agent
 - Plan 额度消费至少降低了 **80%+**（使用廉价模型执行 Act，高能力模型仅用于 Plan/Verify）
-- 建议用于复杂任务、长任务，简单任务会过度思考
+- <span style="color: #c0392b;">建议用于复杂任务、长任务</span>，简单任务会过度思考
 - 大体可用，比直接使用普通模型要强
 
 ### 6. 自举
@@ -84,7 +84,7 @@ PAVP 从 Agent 视角看只是一个模型端点（`model="pavp"`），本质上
 PAVP is essentially an **LLM orchestration layer** implemented as a local proxy:
 
 - **Plan**: A high-capability model analyzes requirements and outputs a structured plan
-- **Act**: An execution model generates code following the plan, written to files via Claude Code
+- **Act**: An execution model generates code following the plan, written to files via the agent
 - **Verify**: The high-capability model audits the code changes, outputting PASS / SHIP-WITH-FIXES / DO-NOT-SHIP (with DebugPlan) / INCOMPLETE (with NewPlan) / NEEDS-REVIEW
 - **Loop**: On failure, loops automatically or manually until passing or reaching max iterations
 
@@ -126,7 +126,7 @@ model    = "pavp"
 
 - Currently used **Trae** \ **Claude**; not tested with other agents
 - Plan token consumption reduced by **80%+** (cheap model for Act, capable model only for Plan/Verify)
-- Recommended for complex/long tasks; simple tasks may cause overthinking
+- <span style="color: #c0392b;">Recommended for complex/long tasks</span>; simple tasks may cause overthinking
 - Generally usable and better than using a raw cheap model directly
 
 ### 6. Bootstrapping
@@ -153,7 +153,7 @@ PAVP/
 │   ├── proxy_server.py      # FastAPI 代理（Plan → Act）
 │   ├── orchestrator.py      # 状态机（Plan → Act → Verify → Loop）
 │   ├── engine.py            # LLM 调用工具
-│   ├── act_executor.py      # Claude Code 子进程执行器
+│   ├── act_executor.py      # 智能体 子进程执行器
 │   ├── prompts.py           # 各阶段提示词模板
 │   ├── models.py            # Pydantic 数据模型
 │   ├── settings.py          # 设置加载器（~/.pavp/settings.json）
@@ -173,7 +173,7 @@ PAVP/
 │   ├── proxy_server.py      # FastAPI proxy (Plan → Act)
 │   ├── orchestrator.py      # State machine (Plan → Act → Verify → Loop)
 │   ├── engine.py            # LLM calling utilities
-│   ├── act_executor.py      # Claude Code subprocess executor
+│   ├── act_executor.py      # Agent subprocess executor
 │   ├── prompts.py           # Prompt templates for all phases
 │   ├── models.py            # Pydantic data models
 │   ├── settings.py          # Settings loader (~/.pavp/settings.json)
