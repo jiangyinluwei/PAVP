@@ -25,7 +25,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-if sys.platform == "win32" and sys.stdout is not None:
+# When bundled with PyInstaller --noconsole and launched without a
+# console (e.g. via the Windows registry Run key on boot), sys.stdout
+# and sys.stderr are None. uvicorn's DefaultFormatter calls
+# sys.stdout.isatty() during logging setup, which raises
+# AttributeError: 'NoneType' object has no attribute 'isatty'.
+# Redirect them to a log file so uvicorn can initialize normally.
+# (When the UI starts the proxy via subprocess with stdout redirected,
+# sys.stdout is not None, so this branch is skipped.)
+if sys.stdout is None or sys.stderr is None:
+    _boot_log = Path.home() / ".pavp" / "proxy_boot.log"
+    _boot_log.parent.mkdir(parents=True, exist_ok=True)
+    _sink = open(_boot_log, "a", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = _sink
+    if sys.stderr is None:
+        sys.stderr = _sink
+elif sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import httpx
@@ -1166,6 +1182,63 @@ def _flush_old_pavp() -> None:
     pid_file.unlink(missing_ok=True)
 
 
+def _maybe_auto_start_ui() -> None:
+    """If *auto_start_ui* is enabled in settings.json, launch the Streamlit UI
+    when the proxy becomes healthy, unless the UI is already running.
+
+    This consolidates the old separate PAVP-UI registry entry into the proxy
+    startup path: a single PAVP-Proxy program starts the proxy, which in turn
+    launches the UI on demand.
+
+    Runs in a daemon thread so it does not block uvicorn.
+    """
+    try:
+        s = load_settings()
+    except Exception:
+        return
+    if not s.get("auto_start_ui", False):
+        return
+
+    # Wait for the proxy health endpoint (up to 30s) so the UI can detect the
+    # running proxy and won't try to start a second instance.
+    port = s.get("proxy_port", DEFAULT_PORT)
+    import urllib.request
+    deadline = time.time() + 30
+    healthy = False
+    while time.time() < deadline:
+        try:
+            r = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+            if r.status == 200:
+                healthy = True
+                break
+        except Exception:
+            time.sleep(1)
+    if not healthy:
+        return
+
+    # Check if the UI is already running on port 8501.
+    import socket as _sock
+    try:
+        c = _sock.create_connection(("127.0.0.1", 8501), timeout=1)
+        c.close()
+        return  # UI already running
+    except OSError:
+        pass
+
+    # Launch the UI (reuses entry_point.py logic - no --headless => Streamlit).
+    import subprocess
+    try:
+        if getattr(sys, "frozen", False):
+            exe = Path(sys.executable).resolve()
+            subprocess.Popen([str(exe)])
+        else:
+            entry_point = Path(__file__).resolve().parent / "entry_point.py"
+            subprocess.Popen([sys.executable, str(entry_point)])
+        print("[PAVP] Auto-started UI (auto_start_ui=true, UI was not running)", flush=True)
+    except Exception as e:
+        print(f"[PAVP] Failed to auto-start UI: {e}", flush=True)
+
+
 def run_server(host="0.0.0.0", port=None):
     s = load_settings()
     if port is None:
@@ -1198,6 +1271,9 @@ def run_server(host="0.0.0.0", port=None):
     print(f"  Plan:          {_plan_cfg['model'] or '?'} @ {_plan_cfg['openai_base_url'] or '?'}", flush=True)
     print(f"  Act:           {_act_cfg['model'] or '?'} @ {_act_cfg['openai_base_url'] or '?'}", flush=True)
     print(f"  Ready:         {bool(_plan_cfg['model'] and _plan_cfg['openai_api'] and _act_cfg['model'] and _act_cfg['openai_api'])}", flush=True)
+    # If auto_start_ui is enabled, launch the UI in a background thread once
+    # the proxy is healthy (replaces the old PAVP-UI registry entry).
+    threading.Thread(target=_maybe_auto_start_ui, daemon=True).start()
     try:
         uvicorn.run(app, host=host, port=actual_port, log_level="info")
     finally:

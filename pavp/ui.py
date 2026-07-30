@@ -260,14 +260,26 @@ def _start_proxy(port: int):
     # Remove stale PID file before starting
     _PID_FILE.unlink(missing_ok=True)
 
-    # Use python.exe (not pythonw.exe) for proxy subprocess: pythonw has no
-    # stdout by default, which breaks sys.stdout.reconfigure in proxy_server.
-    python_exe = sys.executable
-    if sys.platform == "win32":
-        python_dir = Path(python_exe).parent
-        python_normal = python_dir / "python.exe"
-        if python_normal.exists():
-            python_exe = str(python_normal)
+    # Detect if running as a PyInstaller bundle.
+    # When bundled, the exe itself is the entry point; use --headless flag
+    # to start the proxy server. Otherwise use python.exe -m pavp.proxy_server.
+    if getattr(sys, "frozen", False):
+        # Running as PyInstaller bundle: use the exe with --headless flag.
+        python_exe = sys.executable
+        proxy_args = [python_exe, "--headless",
+                      "--host", "0.0.0.0", "--port", str(port)]
+    else:
+        # Running as normal Python: use python.exe -m pavp.proxy_server.
+        # pythonw.exe has no stdout by default, which breaks
+        # sys.stdout.reconfigure in proxy_server.
+        python_exe = sys.executable
+        if sys.platform == "win32":
+            python_dir = Path(python_exe).parent
+            python_normal = python_dir / "python.exe"
+            if python_normal.exists():
+                python_exe = str(python_normal)
+        proxy_args = [python_exe, "-m", "pavp.proxy_server",
+                      "--host", "0.0.0.0", "--port", str(port)]
 
     # Ensure log directory exists before opening log file
     _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -281,8 +293,7 @@ def _start_proxy(port: int):
 
     try:
         proc = subprocess.Popen(
-            [python_exe, "-m", "pavp.proxy_server",
-             "--host", "0.0.0.0", "--port", str(port)],
+            proxy_args,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             cwd=_PROJECT_ROOT,
@@ -959,7 +970,7 @@ except Exception:
 # Sync auto-start setting to registry (always sync to ensure command is up-to-date)
 _auto_start_val = st.session_state.settings_cache.get("auto_start", True)
 _auto_start_ui_val = st.session_state.settings_cache.get("auto_start_ui", False)
-set_auto_start(_auto_start_val, st.session_state.proxy_port, _auto_start_ui_val)
+set_auto_start(_auto_start_val, st.session_state.proxy_port)
 
 # Auto-start proxy on boot if auto-start is enabled and proxy is not running
 if "auto_start_attempted" not in st.session_state:
@@ -1095,20 +1106,19 @@ with _s_lcol2:
     st.markdown(f"**{'On' if _auto_start_on else 'Off'}**")
 if _auto_start_on != _current_auto_start:
     save_field("auto_start", _auto_start_on)
-    set_auto_start(_auto_start_on, st.session_state.proxy_port, _auto_start_ui_val)
+    set_auto_start(_auto_start_on, st.session_state.proxy_port)
     st.session_state.settings_cache = load_settings()
     st.rerun()
 
-# --- Auto-start UI toggle (only visible when Auto Start is ON) ---
+# --- Auto-start UI toggle (launch UI when proxy starts) ---
 _current_auto_start_ui = s.get("auto_start_ui", False)
 _sui_spacer, _sui_lcol1, _sui_lcol2 = st.sidebar.columns([0.04, 0.2, 0.76], vertical_alignment="center", gap="small")
 with _sui_lcol1:
-    _auto_start_ui_on = st.toggle("", value=_current_auto_start_ui, key="auto_start_ui_toggle", label_visibility="collapsed", disabled=not _auto_start_on)
+    _auto_start_ui_on = st.toggle("", value=_current_auto_start_ui, key="auto_start_ui_toggle", label_visibility="collapsed")
 with _sui_lcol2:
     st.markdown(f"**UI {'On' if _auto_start_ui_on else 'Off'}**")
 if _auto_start_ui_on != _current_auto_start_ui:
     save_field("auto_start_ui", _auto_start_ui_on)
-    set_auto_start(_auto_start_on, st.session_state.proxy_port, _auto_start_ui_on)
     st.session_state.settings_cache = load_settings()
     st.rerun()
 

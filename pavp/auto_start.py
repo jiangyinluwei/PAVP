@@ -1,13 +1,16 @@
 """Auto-start on boot support (Windows Registry Run key).
 
-When auto-start is enabled:
-- Always starts the PAVP proxy server (PAVP-Proxy) on boot.
-- Optionally starts the Streamlit UI (PAVP-UI) if auto_start_ui is True.
+When auto-start is enabled, registers a single PAVP-Proxy entry that starts
+the proxy server on boot. The UI is no longer registered separately; instead,
+the proxy reads the *auto_start_ui* setting from settings.json and launches
+the UI on demand if it is not already running (see proxy_server.run_server).
 
-Approach: writes a small Python launcher script (start_proxy.py) into
-~/.pavp/, then registers it under the Run key.  pythonw.exe runs the
-launcher with zero window; the launcher spawns the real proxy process
-with full detachment so it survives the parent process exiting.
+Approach:
+1. If the built exe (dist/pavp/pavp.exe) exists, register it directly
+   in the registry Run key. The exe is built with --noconsole (Windows
+   GUI subsystem), so no console window appears.
+2. Otherwise, fall back to the Python-based launcher (pythonw.exe +
+   ~/.pavp/start_proxy.py).
 """
 from __future__ import annotations
 
@@ -17,15 +20,36 @@ from pathlib import Path
 _STARTUP_SCRIPT = Path.home() / ".pavp" / "start_proxy.py"
 
 
-def set_auto_start(enabled: bool, port: int | None = None, auto_start_ui: bool = False) -> None:
+def _find_built_exe() -> Path | None:
+    """Look for the PyInstaller-built executable.
+
+    When running as a frozen (PyInstaller) exe, sys.executable points to
+    the exe itself - return it directly.
+    When running from source, check common build output directories.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+
+    project_root = Path(__file__).resolve().parent.parent
+    candidates = [
+        project_root / "build" / "pavp" / "pavp.exe",
+        project_root / "dist" / "pavp" / "pavp.exe",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def set_auto_start(enabled: bool, port: int | None = None) -> None:
     """Enable or disable auto-start in Windows registry.
 
-    When enabled, always starts the PAVP proxy server on boot.
-    If *auto_start_ui* is True, also starts the Streamlit UI control panel.
+    When enabled, registers a single PAVP-Proxy entry that starts the proxy
+    server on boot. The UI is launched on demand by the proxy itself (based
+    on the *auto_start_ui* setting in settings.json), so a separate PAVP-UI
+    registry entry is no longer needed.
 
-    Registry entries:
-      - PAVP-Proxy: always set when enabled, starts the proxy server.
-      - PAVP-UI:    set only when enabled AND auto_start_ui is True.
+    Any legacy PAVP-UI registry entry is always cleaned up.
     """
     if sys.platform != "win32":
         return
@@ -48,35 +72,37 @@ def set_auto_start(enabled: bool, port: int | None = None, auto_start_ui: bool =
     )
     try:
         if enabled:
-            python_dir = Path(sys.executable).parent
-            pythonw = str(python_dir / "pythonw.exe")
-            if not Path(pythonw).exists():
-                pythonw = sys.executable  # fallback
-
+            built_exe = _find_built_exe()
             project_root = str(Path(__file__).resolve().parent.parent)
-            python_exe = str(python_dir / "python.exe")
 
-            # Write (or refresh) the launcher script so the registered
-            # command always runs the latest version.
-            _write_startup_script(project_root, python_exe)
-
-            # Registry: pythonw.exe runs the launcher - zero window flash.
-            proxy_cmd = f'"{pythonw}" "{_STARTUP_SCRIPT}"'
-            winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, proxy_cmd)
-
-            # Optionally start the Streamlit UI
-            if auto_start_ui:
-                ui_path = Path(__file__).resolve().parent / "ui.py"
-                ui_cmd = (
-                    f'"{pythonw}" -m streamlit run "{ui_path}"'
-                    f" --server.port 8501"
-                )
-                winreg.SetValueEx(key, "PAVP-UI", 0, winreg.REG_SZ, ui_cmd)
+            if built_exe:
+                # --- Direct exe registration ---
+                # The exe is built with --noconsole (Windows GUI subsystem),
+                # so no console window appears when launched via the
+                # registry Run key at boot.
+                proxy_cmd = f'"{built_exe}" --headless'
+                winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, proxy_cmd)
             else:
-                try:
-                    winreg.DeleteValue(key, "PAVP-UI")
-                except FileNotFoundError:
-                    pass
+                # --- Fall back to Python-based launcher ---
+                python_dir = Path(sys.executable).parent
+                pythonw = str(python_dir / "pythonw.exe")
+                if not Path(pythonw).exists():
+                    pythonw = sys.executable  # fallback
+
+                python_exe = str(python_dir / "python.exe")
+
+                # Write (or refresh) the launcher script
+                _write_startup_script(project_root, python_exe)
+
+                # Registry: pythonw.exe runs the launcher - zero window flash.
+                proxy_cmd = f'"{pythonw}" "{_STARTUP_SCRIPT}"'
+                winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, proxy_cmd)
+
+            # Always clean up the legacy PAVP-UI entry (no longer used).
+            try:
+                winreg.DeleteValue(key, "PAVP-UI")
+            except FileNotFoundError:
+                pass
         else:
             # Remove both entries when auto-start is disabled
             for name in ("PAVP-Proxy", "PAVP-UI"):
@@ -93,7 +119,7 @@ def _write_startup_script(project_root: str, python_exe: str) -> None:
 
     The script:
     1. Waits for network readiness.
-    2. Spawns the proxy with --port 4000 (auto-increments if occupied).
+    2. Spawns the proxy (auto-increments if the configured port is occupied).
     3. Waits for the proxy health endpoint to respond.
     4. Writes a startup status log for diagnostics.
     """
@@ -126,9 +152,9 @@ def _read_proxy_port() -> int:
     """Read the actual port the proxy chose (from settings.json)."""
     try:
         data = json.loads(SETTINGS.read_text(encoding="utf-8-sig"))
-        return data.get("proxy_port", 4000)
+        return data.get("proxy_port", 5401)
     except Exception:
-        return 4000
+        return 5401
 
 try:
     _log("Boot launcher started")

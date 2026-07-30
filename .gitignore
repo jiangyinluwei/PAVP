@@ -39,5 +39,6 @@ temp_motion_uc.txt
 # Build artifacts
 dist/
 build/
+*.spec
 *.egg-info/
 .pytest_cache/

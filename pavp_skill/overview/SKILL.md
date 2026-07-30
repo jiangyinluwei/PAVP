@@ -25,7 +25,7 @@ Core idea: use high-power reasoning models for Plan/Verify, use coding models fo
 | UI | Streamlit >= 1.40 | Config panel + proxy launcher + log viewer |
 | Persistence | SQLite | Session state storage (`~/.pavp/sessions.db`), supports interrupt recovery |
 | Config | JSON | `~/.pavp/settings.json` |
-| Packaging | PyInstaller | Build `dist/pavp.exe` standalone executable |
+| Packaging | PyInstaller | Build `dist/pavp/pavp.exe` standalone executable (`build.ps1`) |
 
 ---
 
@@ -84,17 +84,23 @@ PAVP/
 │   ├── proxy_server.py      # FastAPI proxy server (Plan-Act routing, /v1/chat/completions)
 │   ├── storage.py           # SQLite session persistence (sessions.db)
 │   ├── ui.py                # Streamlit UI config panel + proxy launcher
-│   └── auto_start.py        # Windows auto-start via registry Run key
+│   ├── auto_start.py        # Windows auto-start via registry Run key
+│   └── entry_point.py       # PyInstaller bundle entry point (UI or --headless proxy)
 ├── pavp_skill/              # Project skill folder
-│   ├── find-skills/SKILL.md
-│   ├── writing-plans/SKILL.md
 │   ├── overview/SKILL.md
-│   └── streamlit-ui/SKILL.md
-├── .trae/
-│   ├── rules/               # Project rules directory
-│   └── skills/              # IDE-level skills (orchestrator)
+│   ├── writing-plans/SKILL.md
+│   ├── streamlit-ui/SKILL.md
+│   ├── git-operations/SKILL.md
+│   ├── ps1-encoding/SKILL.md
+│   ├── utf8-bom-encoding/SKILL.md
+│   ├── find-skills/SKILL.md
+│   ├── overview-aware-change/SKILL.md
+│   └── readme-rules/SKILL.md
+├── Assent/
+│   └── pavp.ico             # Application icon for the built exe
 ├── requirements.txt         # Python dependencies
-├── run.ps1                  # Streamlit UI launch script
+├── run.ps1                  # Launch script: auto-builds exe if missing, then launches
+├── build.ps1                # PyInstaller build script: creates dist/pavp/pavp.exe
 └── .gitignore
 ```
 
@@ -148,7 +154,7 @@ Config file location: `~/.pavp/settings.json`
 
 Key fields:
 - `litellm_master_key`: Orchestrator auth key for calling proxy (default `sk-pavp-local`)
-- `proxy_port`: PAVP proxy listen port (default 4001)
+- `proxy_port`: PAVP proxy listen port (default 5401)
 - `plan_model`: Plan/Verify model identifier
 - `plan_openai_api` / `plan_openai_base_url`: Plan/Verify model OpenAI-compatible endpoint
 - `plan_anthropic_api` / `plan_anthropic_base_url`: Plan/Verify model Anthropic-native endpoint
@@ -158,7 +164,8 @@ Key fields:
 - `cc_bin`: Claude Code executable path (default `claude`)
 - `act_max_budget` / `act_max_turns` / `act_timeout`: Act execution limits
 - `loop_mode`: `auto` (automatic loop) / `manual` (manual confirmation)
-- `auto_start`: Enable Windows auto-start (default `True`)
+- `auto_start`: Enable Windows auto-start (default `True`) - registers a single PAVP-Proxy registry entry
+- `auto_start_ui`: When the proxy starts, auto-launch the UI if it is not already running (default `False`) - read by `proxy_server.run_server()`, replaces the old separate PAVP-UI registry entry
 
 Model identifier format: `provider/model` (e.g. `openai/gpt-4o-mini`, `deepseek/deepseek-reasoner`).
 
@@ -200,7 +207,9 @@ The proxy auto-detects API format from the request endpoint:
 
 | Method | Command | Description |
 |---|---|---|
-| UI Launch | `.\run.ps1` | Start Streamlit config panel, proxy runs in background |
+| UI Launch | `.\run.ps1` | Auto-builds exe if missing, then launches the bundled executable |
+| Direct Exe | `.\build\pavp\pavp.exe` | Run the PyInstaller-bundled executable directly (no Python needed) |
+| Headless Proxy | `.\build\pavp\pavp.exe --headless` | Start the proxy server only, no UI (used by auto-start on boot) |
 
 ---
 

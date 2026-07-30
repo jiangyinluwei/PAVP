@@ -38,10 +38,10 @@ PAVP 本质上是一个 **LLM 编排层**，通过本地代理服务实现：
 
 本质上相当于**换了一个 API 端点**，完美匹配现有 Agent 工作流：
 
-1. **运行启动脚本**：双击或运行 `run.ps1`，自动检查 Python 环境（python 版本、依赖包）并安装缺失项，然后打开 Streamlit 控制面板
-2. **填写配置**：编辑 `~/.pavp/settings.json`，填入 plan_model / plan_api / plan_base_url 和 act_model / act_api / act_base_url（运行 `run.ps1` 时自动生成模板）
-3. **启动代理**：在 UI 中点击 "Start Proxy"，或直接运行 `python -m pavp.proxy_server`
-4. **挂载到 Agent**：将 Agent 的 API 地址改为 `http://localhost:XXXX/v1`，API Key 改为 `sk-pavp-local`，模型名改为 `pavp`，根据UI界面展示的端口号调整（默认端口号为 `5401`）
+1. **运行启动脚本**：双击或运行 `run.ps1`，自动构建 `pavp.exe`（首次运行），然后启动打包后的可执行文件并打开 Streamlit 控制面板
+2. **填写配置**：编辑 `~/.pavp/settings.json`，填入各模型的 API 配置（首次运行时自动生成模板）
+3. **启动代理**：在 UI 中点击 "Start Proxy"，或直接运行 `.\dist\pavp\pavp.exe --headless`
+4. **挂载到 Agent**：将 Agent 的 API 地址改为 `http://localhost:XXXX/v1`，API Key 改为 `sk-pavp-local`，模型名改为 `pavp`（默认端口号为 `5401`）
 
 ```python
 # Agent 配置示例
@@ -53,13 +53,13 @@ model    = "pavp"
 ### 4. 关闭进程
 
 - **推荐方式**：在 Streamlit UI 中点击 "Stop Proxy"
-- **彻底关闭**：打开任务管理器，手动中止所有 python.exe 进程（或终止 `pavp.proxy_server` 相关进程）
+- **彻底关闭**：打开任务管理器，终止所有 `pavp.exe` 进程
 
 ### 5. 作者使用情况
 
 - 当前在 **Trae** \ **Claude** 中使用，未测试其他 Agent
 - Plan 额度消费至少降低了 **80%+**（使用廉价模型执行 Act，高能力模型仅用于 Plan/Verify）
-- <span style="color: #c0392b;">建议用于复杂任务、长任务</span>，简单任务会过度思考
+- **建议用于复杂任务、长任务**，简单任务会过度思考
 - 大体可用，比直接使用普通模型要强
 
 ### 6. 自举
@@ -105,10 +105,10 @@ The project uses Windows-specific features: Registry auto-start, `ctypes.windll`
 
 Essentially, you just **swap the API endpoint** — it fits perfectly into your existing agent workflow:
 
-1. **Run launcher**: Run `run.ps1` — it auto-checks the Python environment (python version, dependencies) and installs missing packages, then opens the Streamlit control panel
-2. **Configure**: Edit `~/.pavp/settings.json` — fill in plan_model / plan_api / plan_base_url and act_model / act_api / act_base_url (run `run.ps1` to auto-generate a template)
-3. **Start proxy**: Click "Start Proxy" in the UI, or run `python -m pavp.proxy_server` directly
-4. **Mount to agent**: Point your agent to `http://localhost:XXXX/v1` with API key `sk-pavp-local` and model `pavp` — adjust the port based on the UI display (default port is `5401`)
+1. **Run launcher**: Run `run.ps1` — it auto-builds `pavp.exe` (first run) and launches the bundled executable, opening the Streamlit control panel
+2. **Configure**: Edit `~/.pavp/settings.json` — fill in the API config for each model (auto-generated template on first run)
+3. **Start proxy**: Click "Start Proxy" in the UI, or run `.\dist\pavp\pavp.exe --headless` directly
+4. **Mount to agent**: Point your agent to `http://localhost:XXXX/v1` with API key `sk-pavp-local` and model `pavp` (default port is `5401`)
 
 ```python
 # Agent configuration example
@@ -120,13 +120,13 @@ model    = "pavp"
 ### 4. Stopping the Process
 
 - **Recommended**: Click "Stop Proxy" in the Streamlit UI
-- **Force kill**: Open Task Manager and manually terminate all python.exe processes (or kill those related to `pavp.proxy_server`)
+- **Force kill**: Open Task Manager and terminate all `pavp.exe` processes
 
 ### 5. Author's Usage
 
 - Currently used **Trae** \ **Claude**; not tested with other agents
 - Plan token consumption reduced by **80%+** (cheap model for Act, capable model only for Plan/Verify)
-- <span style="color: #c0392b;">Recommended for complex/long tasks</span>; simple tasks may cause overthinking
+- **Recommended for complex/long tasks**; simple tasks may cause overthinking
 - Generally usable and better than using a raw cheap model directly
 
 ### 6. Bootstrapping
