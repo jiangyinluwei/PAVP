@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-$exePath = Join-Path $root (Join-Path "build" (Join-Path "pavp" "pavp.exe"))
+$exePath = Join-Path $root (Join-Path "dist" (Join-Path "pavp" "pavp.exe"))
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  PAVP - Plan-Act-Verify-Plan" -ForegroundColor Cyan

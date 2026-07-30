@@ -4,7 +4,7 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 $iconPath = Join-Path $root (Join-Path "Assent" "pavp.ico")
-$buildDir = Join-Path $root "build"
+$buildDir = Join-Path $root "dist"
 
 # ------------------------------------------------------------
 # 1. Check / install PyInstaller
@@ -29,6 +29,10 @@ try {
 # 2. Clean old build artifacts
 # ------------------------------------------------------------
 Write-Host "[*] 清理旧构建 ..." -ForegroundColor Yellow
+$oldBuildDir = Join-Path $root "build"
+if (Test-Path $oldBuildDir) {
+    Remove-Item -Recurse -Force $oldBuildDir
+}
 if (Test-Path $buildDir) {
     Remove-Item -Recurse -Force $buildDir
 }
@@ -58,6 +62,7 @@ $pyArgs = @(
     '--onedir',
     '--name', 'pavp',
     '--distpath', "`"$buildDir`"",
+    '--workpath', "`"$buildDir\_work`"",
     '--icon', "`"$iconPath`"",
     '--add-data', '"pavp;./pavp"',
     '--hidden-import', 'pavp.ui',
