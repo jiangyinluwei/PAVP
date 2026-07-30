@@ -124,9 +124,13 @@ The `pavp_skill/` directory already contains these skills, no external search ne
 |---|---|---|
 | `overview` | PAVP project overview and context | Before any project task |
 | `writing-plans` | Implementation plan and task decomposition | New features/major changes/saying "plan" |
-| `find-skills` | Discover and install skills (this skill) | Looking for new capabilities |
 | `streamlit-ui` | Streamlit UI design and debugging guidance | Modifying ui.py / Streamlit-related issues |
+| `git-operations` | Git operation safety rules | Git commands (add, commit, push, etc.) |
+| `ps1-encoding` | PowerShell .ps1 file UTF-8 BOM encoding | Modifying .ps1 files |
+| `utf8-bom-encoding` | UTF-8 BOM encoding rule for all file saves | Writing/saving any text file |
+| `find-skills` | Discover and install skills (this skill) | Looking for new capabilities |
 | `overview-aware-change` | Read overview before changes, update after completion | Project deletions, restructuring, logic changes |
+| `readme-rules` | README.md update rules and conventions | Updating README.md |
 
 ## Search Tips
 

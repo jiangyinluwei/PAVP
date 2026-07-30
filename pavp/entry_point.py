@@ -19,16 +19,10 @@ def _ensure_settings() -> None:
         template = {
             "litellm_master_key": "sk-pavp-local",
             "proxy_port": 5401,
-            "plan_model": "",
-            "plan_openai_api": "",
-            "plan_openai_base_url": "",
-            "plan_anthropic_api": "",
-            "plan_anthropic_base_url": "",
-            "act_model": "",
-            "act_openai_api": "",
-            "act_openai_base_url": "",
-            "act_anthropic_api": "",
-            "act_anthropic_base_url": "",
+            "plan_0": {"model": "", "openai_api": "", "openai_base_url": "", "anthropic_api": "", "anthropic_base_url": ""},
+            "act_0": {"model": "", "openai_api": "", "openai_base_url": "", "anthropic_api": "", "anthropic_base_url": ""},
+            "current_plan_id": 0,
+            "current_act_id": 0,
             "cc_bin": "claude",
             "act_max_budget": 3.0,
             "act_max_turns": 40,
@@ -39,7 +33,7 @@ def _ensure_settings() -> None:
         }
         settings_path.write_text(
             json.dumps(template, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+            encoding="utf-8-sig",
         )
         print(f"[PAVP] Settings template created at {settings_path}")
 

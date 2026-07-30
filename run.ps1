@@ -12,16 +12,16 @@ Write-Host "============================================================" -Foreg
 
 # -- Check if the built exe exists --
 if (-not (Test-Path $exePath)) {
-    Write-Host "[*] 未找到可执行文件，正在构建 ..." -ForegroundColor Yellow
+    Write-Host "[*] Executable not found, building..." -ForegroundColor Yellow
 
     # -- Check Python (needed for building) --
     try {
         $null = python --version 2>&1
         if ($LASTEXITCODE -ne 0) { throw }
     } catch {
-        Write-Host "[✗] 构建需要 Python，但 Python 未安装或不在 PATH 中！" -ForegroundColor Red
-        Write-Host "    请安装 Python 3.10+ (https://python.org) 并确保 'python' 命令可用。" -ForegroundColor Yellow
-        Write-Host "    安装完成后重新运行本脚本。" -ForegroundColor Yellow
+        Write-Host "[✗] Build requires Python, but Python is not installed or not in PATH!" -ForegroundColor Red
+        Write-Host "    Please install Python 3.10+ (https://python.org) and ensure the 'python' command is available." -ForegroundColor Yellow
+        Write-Host "    Re-run this script after installation." -ForegroundColor Yellow
         pause
         exit 1
     }
@@ -31,19 +31,19 @@ if (-not (Test-Path $exePath)) {
     $buildScript = Join-Path $root "build.ps1"
     & $buildScript
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[✗] 构建失败，请检查上方日志。" -ForegroundColor Red
+        Write-Host "[✗] Build failed. Check the logs above." -ForegroundColor Red
         pause
         exit 1
     }
-    Write-Host "[✓] 构建完成" -ForegroundColor Green
+    Write-Host "[✓] Build completed" -ForegroundColor Green
 } else {
-    Write-Host "[✓] 可执行文件已就绪: $exePath" -ForegroundColor Green
+    Write-Host "[✓] Executable ready: $exePath" -ForegroundColor Green
 }
 
 # -- Launch the bundled executable --
-Write-Host "[*] 正在启动 PAVP UI ..." -ForegroundColor Yellow
-Write-Host "    浏览器将自动打开 http://localhost:8501" -ForegroundColor DarkGray
-Write-Host "    终端将自动关闭。" -ForegroundColor DarkGray
+Write-Host "[*] Starting PAVP UI..." -ForegroundColor Yellow
+Write-Host "    Browser will auto-open http://localhost:8501" -ForegroundColor DarkGray
+Write-Host "    Terminal will auto-close." -ForegroundColor DarkGray
 
 Start-Process -FilePath $exePath `
     -WorkingDirectory $root `

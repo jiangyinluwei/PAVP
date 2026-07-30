@@ -1,4 +1,4 @@
-﻿---
+---
 name: "ps1-encoding"
 description: "PowerShell .ps1 file UTF-8 BOM encoding rule. Invoke when modifying run.ps1, build.ps1, or any .ps1 file in the project. Prevents PowerShell 5.x parse errors caused by missing BOM on Chinese Windows."
 ---
@@ -29,6 +29,8 @@ Try 语句缺少自己的 Catch 或 Finally 块。(Try without Catch/Finally)
 These errors **all point to the same root cause**: garbled Chinese text due to wrong encoding. Do NOT try to fix each error individually — just add BOM and the errors disappear.
 
 ## Rule
+
+**Do NOT write Chinese (or any non-ASCII characters) in `run.ps1`.** All user-facing messages in `run.ps1` must be in English only. This applies to `Write-Host` strings, comments, and any other string literals. This eliminates the encoding dependency entirely for the entry-point script.
 
 **When editing any `.ps1` file (especially `run.ps1`, `build.ps1`):**
 

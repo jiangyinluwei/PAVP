@@ -25,7 +25,7 @@ Core idea: use high-power reasoning models for Plan/Verify, use coding models fo
 | UI | Streamlit >= 1.40 | Config panel + proxy launcher + log viewer |
 | Persistence | SQLite | Session state storage (`~/.pavp/sessions.db`), supports interrupt recovery |
 | Config | JSON | `~/.pavp/settings.json` |
-| Packaging | PyInstaller | Build `build/pavp/pavp.exe` standalone executable (`build.ps1`) |
+| Packaging | PyInstaller | Build `dist/pavp/pavp.exe` standalone executable (`build.ps1`) |
 
 ---
 
@@ -87,18 +87,20 @@ PAVP/
 │   ├── auto_start.py        # Windows auto-start via registry Run key
 │   └── entry_point.py       # PyInstaller bundle entry point (UI or --headless proxy)
 ├── pavp_skill/              # Project skill folder
-│   ├── find-skills/SKILL.md
-│   ├── writing-plans/SKILL.md
 │   ├── overview/SKILL.md
-│   └── streamlit-ui/SKILL.md
+│   ├── writing-plans/SKILL.md
+│   ├── streamlit-ui/SKILL.md
+│   ├── git-operations/SKILL.md
+│   ├── ps1-encoding/SKILL.md
+│   ├── utf8-bom-encoding/SKILL.md
+│   ├── find-skills/SKILL.md
+│   ├── overview-aware-change/SKILL.md
+│   └── readme-rules/SKILL.md
 ├── Assent/
 │   └── pavp.ico             # Application icon for the built exe
-├── .trae/
-│   ├── rules/               # Project rules directory
-│   └── skills/              # IDE-level skills (orchestrator)
 ├── requirements.txt         # Python dependencies
 ├── run.ps1                  # Launch script: auto-builds exe if missing, then launches
-├── build.ps1                # PyInstaller build script: creates build/pavp/pavp.exe
+├── build.ps1                # PyInstaller build script: creates dist/pavp/pavp.exe
 └── .gitignore
 ```
 
@@ -152,7 +154,7 @@ Config file location: `~/.pavp/settings.json`
 
 Key fields:
 - `litellm_master_key`: Orchestrator auth key for calling proxy (default `sk-pavp-local`)
-- `proxy_port`: PAVP proxy listen port (default 4001)
+- `proxy_port`: PAVP proxy listen port (default 5401)
 - `plan_model`: Plan/Verify model identifier
 - `plan_openai_api` / `plan_openai_base_url`: Plan/Verify model OpenAI-compatible endpoint
 - `plan_anthropic_api` / `plan_anthropic_base_url`: Plan/Verify model Anthropic-native endpoint

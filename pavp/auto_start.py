@@ -119,7 +119,7 @@ def _write_startup_script(project_root: str, python_exe: str) -> None:
 
     The script:
     1. Waits for network readiness.
-    2. Spawns the proxy with --port 4000 (auto-increments if occupied).
+    2. Spawns the proxy (auto-increments if the configured port is occupied).
     3. Waits for the proxy health endpoint to respond.
     4. Writes a startup status log for diagnostics.
     """
@@ -152,9 +152,9 @@ def _read_proxy_port() -> int:
     """Read the actual port the proxy chose (from settings.json)."""
     try:
         data = json.loads(SETTINGS.read_text(encoding="utf-8-sig"))
-        return data.get("proxy_port", 4000)
+        return data.get("proxy_port", 5401)
     except Exception:
-        return 4000
+        return 5401
 
 try:
     _log("Boot launcher started")

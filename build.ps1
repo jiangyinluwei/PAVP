@@ -72,7 +72,7 @@ $pyArgs = @(
     '--hidden-import', 'pavp.engine',
     '--hidden-import', 'pavp.orchestrator',
     '--hidden-import', 'pavp.act_executor',
-    '--hidden-import', 'pavp.storage',
+    
     '--hidden-import', 'pavp.prompts',
     '--hidden-import', 'pavp.models',
     '--hidden-import', 'pavp.entry_point',
