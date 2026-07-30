@@ -970,7 +970,7 @@ except Exception:
 # Sync auto-start setting to registry (always sync to ensure command is up-to-date)
 _auto_start_val = st.session_state.settings_cache.get("auto_start", True)
 _auto_start_ui_val = st.session_state.settings_cache.get("auto_start_ui", False)
-set_auto_start(_auto_start_val, st.session_state.proxy_port, _auto_start_ui_val)
+set_auto_start(_auto_start_val, st.session_state.proxy_port)
 
 # Auto-start proxy on boot if auto-start is enabled and proxy is not running
 if "auto_start_attempted" not in st.session_state:
@@ -1106,20 +1106,19 @@ with _s_lcol2:
     st.markdown(f"**{'On' if _auto_start_on else 'Off'}**")
 if _auto_start_on != _current_auto_start:
     save_field("auto_start", _auto_start_on)
-    set_auto_start(_auto_start_on, st.session_state.proxy_port, _auto_start_ui_val)
+    set_auto_start(_auto_start_on, st.session_state.proxy_port)
     st.session_state.settings_cache = load_settings()
     st.rerun()
 
-# --- Auto-start UI toggle (only visible when Auto Start is ON) ---
+# --- Auto-start UI toggle (launch UI when proxy starts) ---
 _current_auto_start_ui = s.get("auto_start_ui", False)
 _sui_spacer, _sui_lcol1, _sui_lcol2 = st.sidebar.columns([0.04, 0.2, 0.76], vertical_alignment="center", gap="small")
 with _sui_lcol1:
-    _auto_start_ui_on = st.toggle("", value=_current_auto_start_ui, key="auto_start_ui_toggle", label_visibility="collapsed", disabled=not _auto_start_on)
+    _auto_start_ui_on = st.toggle("", value=_current_auto_start_ui, key="auto_start_ui_toggle", label_visibility="collapsed")
 with _sui_lcol2:
     st.markdown(f"**UI {'On' if _auto_start_ui_on else 'Off'}**")
 if _auto_start_ui_on != _current_auto_start_ui:
     save_field("auto_start_ui", _auto_start_ui_on)
-    set_auto_start(_auto_start_on, st.session_state.proxy_port, _auto_start_ui_on)
     st.session_state.settings_cache = load_settings()
     st.rerun()
 

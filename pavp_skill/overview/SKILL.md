@@ -162,7 +162,8 @@ Key fields:
 - `cc_bin`: Claude Code executable path (default `claude`)
 - `act_max_budget` / `act_max_turns` / `act_timeout`: Act execution limits
 - `loop_mode`: `auto` (automatic loop) / `manual` (manual confirmation)
-- `auto_start`: Enable Windows auto-start (default `True`)
+- `auto_start`: Enable Windows auto-start (default `True`) - registers a single PAVP-Proxy registry entry
+- `auto_start_ui`: When the proxy starts, auto-launch the UI if it is not already running (default `False`) - read by `proxy_server.run_server()`, replaces the old separate PAVP-UI registry entry
 
 Model identifier format: `provider/model` (e.g. `openai/gpt-4o-mini`, `deepseek/deepseek-reasoner`).
 

@@ -39,7 +39,7 @@ PAVP/
 │   ├── proxy_server.py      # FastAPI 代理服务器 (Plan-Act 路由, /v1/chat/completions)
 │   ├── storage.py           # SQLite 会话持久化 (sessions.db)
 │   ├── ui.py                # Streamlit UI 配置面板 + 代理启动器
-│   ├── auto_start.py        # Windows 自启动 (VBS 包装 + 注册表 Run 键)
+│   ├── auto_start.py        # Windows 自启动 (注册表 Run 键)
 │   └── entry_point.py       # PyInstaller 打包入口点 (UI 或 --headless 代理)
 ├── pavp_skill/              # 项目技能文件夹（见下方路由表）
 ├── Assent/
@@ -147,4 +147,4 @@ description: "<功能描述，包含触发条件，不超过200字符>"
 |---|---|---|
 | UI 启动 | `.\run.ps1` | 自动构建 exe（如缺失），然后启动打包后的可执行文件 |
 | 直接运行 | `.\build\pavp\pavp.exe` | 直接运行打包后的 exe（无需 Python） |
-| 自启动（开机） | 注册表 Run 键 -> `wscript.exe` VBS 包装 | 如有 exe 则使用 `pavp.exe --headless`，否则回退到 Python 启动脚本 |
+| 自启动（开机） | 注册表 Run 键 -> `pavp.exe --headless` | 如有 exe 则使用 `pavp.exe --headless`，否则回退到 Python 启动脚本 |

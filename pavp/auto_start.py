@@ -1,12 +1,14 @@
 """Auto-start on boot support (Windows Registry Run key).
 
-When auto-start is enabled:
-- Always starts the PAVP proxy server (PAVP-Proxy) on boot.
-- Optionally starts the Streamlit UI (PAVP-UI) if auto_start_ui is True.
+When auto-start is enabled, registers a single PAVP-Proxy entry that starts
+the proxy server on boot. The UI is no longer registered separately; instead,
+the proxy reads the *auto_start_ui* setting from settings.json and launches
+the UI on demand if it is not already running (see proxy_server.run_server).
 
 Approach:
-1. If the built exe (build/pavp/pavp.exe) exists, register a VBS launcher
-   that runs the exe with --headless flag (zero window flash).
+1. If the built exe (dist/pavp/pavp.exe) exists, register it directly
+   in the registry Run key. The exe is built with --noconsole (Windows
+   GUI subsystem), so no console window appears.
 2. Otherwise, fall back to the Python-based launcher (pythonw.exe +
    ~/.pavp/start_proxy.py).
 """
@@ -16,19 +18,22 @@ import sys
 from pathlib import Path
 
 _STARTUP_SCRIPT = Path.home() / ".pavp" / "start_proxy.py"
-_VBS_LAUNCHER = Path.home() / ".pavp" / "start_proxy.vbs"
 
 
 def _find_built_exe() -> Path | None:
     """Look for the PyInstaller-built executable.
 
-    Checks common locations:
-      - <project_root>/build/pavp/pavp.exe
-    Returns the path if found, None otherwise.
+    When running as a frozen (PyInstaller) exe, sys.executable points to
+    the exe itself - return it directly.
+    When running from source, check common build output directories.
     """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+
     project_root = Path(__file__).resolve().parent.parent
     candidates = [
         project_root / "build" / "pavp" / "pavp.exe",
+        project_root / "dist" / "pavp" / "pavp.exe",
     ]
     for p in candidates:
         if p.exists():
@@ -36,29 +41,15 @@ def _find_built_exe() -> Path | None:
     return None
 
 
-def _write_vbs_launcher(exe_path: str) -> Path:
-    """Write a VBS launcher that runs the exe with --headless silently.
-
-    WScript.Shell.Run with windowStyle=0 hides the console window.
-    The VBS exits immediately after launching; the exe process lives on.
-    """
-    _VBS_LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
-    _VBS_LAUNCHER.write_text(
-        f'CreateObject("WScript.Shell").Run "{exe_path} --headless", 0, False\n',
-        encoding="utf-8",
-    )
-    return _VBS_LAUNCHER
-
-
-def set_auto_start(enabled: bool, port: int | None = None, auto_start_ui: bool = False) -> None:
+def set_auto_start(enabled: bool, port: int | None = None) -> None:
     """Enable or disable auto-start in Windows registry.
 
-    When enabled, always starts the PAVP proxy server on boot.
-    If *auto_start_ui* is True, also starts the Streamlit UI control panel.
+    When enabled, registers a single PAVP-Proxy entry that starts the proxy
+    server on boot. The UI is launched on demand by the proxy itself (based
+    on the *auto_start_ui* setting in settings.json), so a separate PAVP-UI
+    registry entry is no longer needed.
 
-    Registry entries:
-      - PAVP-Proxy: always set when enabled, starts the proxy server.
-      - PAVP-UI:    set only when enabled AND auto_start_ui is True.
+    Any legacy PAVP-UI registry entry is always cleaned up.
     """
     if sys.platform != "win32":
         return
@@ -85,19 +76,12 @@ def set_auto_start(enabled: bool, port: int | None = None, auto_start_ui: bool =
             project_root = str(Path(__file__).resolve().parent.parent)
 
             if built_exe:
-                # --- Use the built exe with VBS launcher (zero window) ---
-                _write_vbs_launcher(str(built_exe))
-                proxy_cmd = f'wscript.exe "{_VBS_LAUNCHER}"'
+                # --- Direct exe registration ---
+                # The exe is built with --noconsole (Windows GUI subsystem),
+                # so no console window appears when launched via the
+                # registry Run key at boot.
+                proxy_cmd = f'"{built_exe}" --headless'
                 winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, proxy_cmd)
-
-                if auto_start_ui:
-                    ui_cmd = f'"{built_exe}"'
-                    winreg.SetValueEx(key, "PAVP-UI", 0, winreg.REG_SZ, ui_cmd)
-                else:
-                    try:
-                        winreg.DeleteValue(key, "PAVP-UI")
-                    except FileNotFoundError:
-                        pass
             else:
                 # --- Fall back to Python-based launcher ---
                 python_dir = Path(sys.executable).parent
@@ -114,18 +98,11 @@ def set_auto_start(enabled: bool, port: int | None = None, auto_start_ui: bool =
                 proxy_cmd = f'"{pythonw}" "{_STARTUP_SCRIPT}"'
                 winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, proxy_cmd)
 
-                if auto_start_ui:
-                    ui_path = Path(__file__).resolve().parent / "ui.py"
-                    ui_cmd = (
-                        f'"{pythonw}" -m streamlit run "{ui_path}"'
-                        f" --server.port 8501"
-                    )
-                    winreg.SetValueEx(key, "PAVP-UI", 0, winreg.REG_SZ, ui_cmd)
-                else:
-                    try:
-                        winreg.DeleteValue(key, "PAVP-UI")
-                    except FileNotFoundError:
-                        pass
+            # Always clean up the legacy PAVP-UI entry (no longer used).
+            try:
+                winreg.DeleteValue(key, "PAVP-UI")
+            except FileNotFoundError:
+                pass
         else:
             # Remove both entries when auto-start is disabled
             for name in ("PAVP-Proxy", "PAVP-UI"):

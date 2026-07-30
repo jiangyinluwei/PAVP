@@ -61,9 +61,21 @@ def main() -> None:
     # Default: launch Streamlit UI.
     from streamlit.web import cli as stcli
 
-    ui_path = Path(__file__).resolve().parent / "ui.py"
+    # In a PyInstaller onedir bundle the running entry_point sits at
+    # <_internal>/entry_point.py while ui.py is shipped as data under
+    # <_internal>/pavp/ui.py. When running from source they share the
+    # same pavp/ directory.
+    if getattr(sys, "frozen", False):
+        bundle_dir = Path(getattr(sys, "_MEIPASS", "."))
+        ui_path = bundle_dir / "pavp" / "ui.py"
+    else:
+        ui_path = Path(__file__).resolve().parent / "ui.py"
     sys.argv = [
         "streamlit", "run", str(ui_path),
+        # PyInstaller bundles Streamlit outside site-packages, which makes
+        # global.developmentMode default to True and forbid setting
+        # server.port. Run in production mode so the explicit port works.
+        "--global.developmentMode", "false",
         "--server.port", "8501",
     ]
     sys.exit(stcli.main())

@@ -80,6 +80,7 @@ $pyArgs = @(
     '--collect-all', 'streamlit',
     '--collect-all', 'httpx',
     '--noconfirm',
+    '--noconsole',
     'pavp/entry_point.py'
 ) -join ' '
 
