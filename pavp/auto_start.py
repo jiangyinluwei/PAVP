@@ -4,10 +4,11 @@ When auto-start is enabled:
 - Always starts the PAVP proxy server (PAVP-Proxy) on boot.
 - Optionally starts the Streamlit UI (PAVP-UI) if auto_start_ui is True.
 
-Approach: writes a small Python launcher script (start_proxy.py) into
-~/.pavp/, then registers it under the Run key.  pythonw.exe runs the
-launcher with zero window; the launcher spawns the real proxy process
-with full detachment so it survives the parent process exiting.
+Approach:
+1. If the built exe (build/pavp/pavp.exe) exists, register a VBS launcher
+   that runs the exe with --headless flag (zero window flash).
+2. Otherwise, fall back to the Python-based launcher (pythonw.exe +
+   ~/.pavp/start_proxy.py).
 """
 from __future__ import annotations
 
@@ -15,6 +16,38 @@ import sys
 from pathlib import Path
 
 _STARTUP_SCRIPT = Path.home() / ".pavp" / "start_proxy.py"
+_VBS_LAUNCHER = Path.home() / ".pavp" / "start_proxy.vbs"
+
+
+def _find_built_exe() -> Path | None:
+    """Look for the PyInstaller-built executable.
+
+    Checks common locations:
+      - <project_root>/build/pavp/pavp.exe
+    Returns the path if found, None otherwise.
+    """
+    project_root = Path(__file__).resolve().parent.parent
+    candidates = [
+        project_root / "build" / "pavp" / "pavp.exe",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def _write_vbs_launcher(exe_path: str) -> Path:
+    """Write a VBS launcher that runs the exe with --headless silently.
+
+    WScript.Shell.Run with windowStyle=0 hides the console window.
+    The VBS exits immediately after launching; the exe process lives on.
+    """
+    _VBS_LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
+    _VBS_LAUNCHER.write_text(
+        f'CreateObject("WScript.Shell").Run "{exe_path} --headless", 0, False\n',
+        encoding="utf-8",
+    )
+    return _VBS_LAUNCHER
 
 
 def set_auto_start(enabled: bool, port: int | None = None, auto_start_ui: bool = False) -> None:
@@ -48,35 +81,51 @@ def set_auto_start(enabled: bool, port: int | None = None, auto_start_ui: bool =
     )
     try:
         if enabled:
-            python_dir = Path(sys.executable).parent
-            pythonw = str(python_dir / "pythonw.exe")
-            if not Path(pythonw).exists():
-                pythonw = sys.executable  # fallback
-
+            built_exe = _find_built_exe()
             project_root = str(Path(__file__).resolve().parent.parent)
-            python_exe = str(python_dir / "python.exe")
 
-            # Write (or refresh) the launcher script so the registered
-            # command always runs the latest version.
-            _write_startup_script(project_root, python_exe)
+            if built_exe:
+                # --- Use the built exe with VBS launcher (zero window) ---
+                _write_vbs_launcher(str(built_exe))
+                proxy_cmd = f'wscript.exe "{_VBS_LAUNCHER}"'
+                winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, proxy_cmd)
 
-            # Registry: pythonw.exe runs the launcher - zero window flash.
-            proxy_cmd = f'"{pythonw}" "{_STARTUP_SCRIPT}"'
-            winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, proxy_cmd)
-
-            # Optionally start the Streamlit UI
-            if auto_start_ui:
-                ui_path = Path(__file__).resolve().parent / "ui.py"
-                ui_cmd = (
-                    f'"{pythonw}" -m streamlit run "{ui_path}"'
-                    f" --server.port 8501"
-                )
-                winreg.SetValueEx(key, "PAVP-UI", 0, winreg.REG_SZ, ui_cmd)
+                if auto_start_ui:
+                    ui_cmd = f'"{built_exe}"'
+                    winreg.SetValueEx(key, "PAVP-UI", 0, winreg.REG_SZ, ui_cmd)
+                else:
+                    try:
+                        winreg.DeleteValue(key, "PAVP-UI")
+                    except FileNotFoundError:
+                        pass
             else:
-                try:
-                    winreg.DeleteValue(key, "PAVP-UI")
-                except FileNotFoundError:
-                    pass
+                # --- Fall back to Python-based launcher ---
+                python_dir = Path(sys.executable).parent
+                pythonw = str(python_dir / "pythonw.exe")
+                if not Path(pythonw).exists():
+                    pythonw = sys.executable  # fallback
+
+                python_exe = str(python_dir / "python.exe")
+
+                # Write (or refresh) the launcher script
+                _write_startup_script(project_root, python_exe)
+
+                # Registry: pythonw.exe runs the launcher - zero window flash.
+                proxy_cmd = f'"{pythonw}" "{_STARTUP_SCRIPT}"'
+                winreg.SetValueEx(key, "PAVP-Proxy", 0, winreg.REG_SZ, proxy_cmd)
+
+                if auto_start_ui:
+                    ui_path = Path(__file__).resolve().parent / "ui.py"
+                    ui_cmd = (
+                        f'"{pythonw}" -m streamlit run "{ui_path}"'
+                        f" --server.port 8501"
+                    )
+                    winreg.SetValueEx(key, "PAVP-UI", 0, winreg.REG_SZ, ui_cmd)
+                else:
+                    try:
+                        winreg.DeleteValue(key, "PAVP-UI")
+                    except FileNotFoundError:
+                        pass
         else:
             # Remove both entries when auto-start is disabled
             for name in ("PAVP-Proxy", "PAVP-UI"):

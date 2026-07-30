@@ -25,7 +25,7 @@ Core idea: use high-power reasoning models for Plan/Verify, use coding models fo
 | UI | Streamlit >= 1.40 | Config panel + proxy launcher + log viewer |
 | Persistence | SQLite | Session state storage (`~/.pavp/sessions.db`), supports interrupt recovery |
 | Config | JSON | `~/.pavp/settings.json` |
-| Packaging | PyInstaller | Build `dist/pavp.exe` standalone executable |
+| Packaging | PyInstaller | Build `build/pavp/pavp.exe` standalone executable (`build.ps1`) |
 
 ---
 
@@ -84,17 +84,21 @@ PAVP/
 │   ├── proxy_server.py      # FastAPI proxy server (Plan-Act routing, /v1/chat/completions)
 │   ├── storage.py           # SQLite session persistence (sessions.db)
 │   ├── ui.py                # Streamlit UI config panel + proxy launcher
-│   └── auto_start.py        # Windows auto-start via registry Run key
+│   ├── auto_start.py        # Windows auto-start via registry Run key
+│   └── entry_point.py       # PyInstaller bundle entry point (UI or --headless proxy)
 ├── pavp_skill/              # Project skill folder
 │   ├── find-skills/SKILL.md
 │   ├── writing-plans/SKILL.md
 │   ├── overview/SKILL.md
 │   └── streamlit-ui/SKILL.md
+├── Assent/
+│   └── pavp.ico             # Application icon for the built exe
 ├── .trae/
 │   ├── rules/               # Project rules directory
 │   └── skills/              # IDE-level skills (orchestrator)
 ├── requirements.txt         # Python dependencies
-├── run.ps1                  # Streamlit UI launch script
+├── run.ps1                  # Launch script: auto-builds exe if missing, then launches
+├── build.ps1                # PyInstaller build script: creates build/pavp/pavp.exe
 └── .gitignore
 ```
 
@@ -200,7 +204,9 @@ The proxy auto-detects API format from the request endpoint:
 
 | Method | Command | Description |
 |---|---|---|
-| UI Launch | `.\run.ps1` | Start Streamlit config panel, proxy runs in background |
+| UI Launch | `.\run.ps1` | Auto-builds exe if missing, then launches the bundled executable |
+| Direct Exe | `.\build\pavp\pavp.exe` | Run the PyInstaller-bundled executable directly (no Python needed) |
+| Headless Proxy | `.\build\pavp\pavp.exe --headless` | Start the proxy server only, no UI (used by auto-start on boot) |
 
 ---
 

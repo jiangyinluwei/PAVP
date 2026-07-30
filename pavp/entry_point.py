@@ -1,0 +1,73 @@
+"""PAVP entry point for PyInstaller bundle.
+
+Supports two modes:
+  - Default: launches the Streamlit UI (replaces run.ps1).
+  - --headless: starts the proxy server only (used by auto-start on boot).
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+def _ensure_settings() -> None:
+    """Create settings.json template if it doesn't exist."""
+    settings_path = Path.home() / ".pavp" / "settings.json"
+    if not settings_path.exists():
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        template = {
+            "litellm_master_key": "sk-pavp-local",
+            "proxy_port": 5401,
+            "plan_model": "",
+            "plan_openai_api": "",
+            "plan_openai_base_url": "",
+            "plan_anthropic_api": "",
+            "plan_anthropic_base_url": "",
+            "act_model": "",
+            "act_openai_api": "",
+            "act_openai_base_url": "",
+            "act_anthropic_api": "",
+            "act_anthropic_base_url": "",
+            "cc_bin": "claude",
+            "act_max_budget": 3.0,
+            "act_max_turns": 40,
+            "act_timeout": 600,
+            "loop_mode": "auto",
+            "auto_start": True,
+            "auto_start_ui": False,
+        }
+        settings_path.write_text(
+            json.dumps(template, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"[PAVP] Settings template created at {settings_path}")
+
+
+def main() -> None:
+    """Main entry point."""
+    _ensure_settings()
+
+    # Headless mode: start proxy server only (used by auto-start).
+    if "--headless" in sys.argv:
+        from pavp.proxy_server import main as proxy_main
+
+        # Strip --headless, pass through --host and --port to proxy_server.
+        args = [a for a in sys.argv[1:] if a != "--headless"]
+        sys.argv = [sys.argv[0]] + args
+        proxy_main()
+        return
+
+    # Default: launch Streamlit UI.
+    from streamlit.web import cli as stcli
+
+    ui_path = Path(__file__).resolve().parent / "ui.py"
+    sys.argv = [
+        "streamlit", "run", str(ui_path),
+        "--server.port", "8501",
+    ]
+    sys.exit(stcli.main())
+
+
+if __name__ == "__main__":
+    main()
